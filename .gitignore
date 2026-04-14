@@ -1,3 +1,5 @@
 .vscode
 note.txt
 __pycache__
+todo.md
+__pycache__/command_gui.cpython-310.pyc

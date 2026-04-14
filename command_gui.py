@@ -75,6 +75,7 @@ class CommandExecutor:
             self.append_to_queue("─" * 80)
 
             # Run command using shell, with new process group for proper cleanup
+            # preexec_fn=os.setsid creates a new session, so killpg only affects this command
             self.process = subprocess.Popen(
                 command,
                 shell=True,
@@ -82,7 +83,8 @@ class CommandExecutor:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                preexec_fn=os.setsid
             )
 
             # Read output in real-time
@@ -109,7 +111,7 @@ class CommandExecutor:
             self.append_to_queue(f"✗ Error: {str(e)}\n")
 
     def kill_process(self):
-        """Kill the running process like Ctrl+C in terminal"""
+        """Kill the running process and all its children like Ctrl+C in terminal"""
         if not self.process:
             print("[KILL] No process"); sys.stdout.flush()
             return
@@ -117,83 +119,72 @@ class CommandExecutor:
         print(f"[KILL] START - PID={self.process.pid}"); sys.stdout.flush()
         
         if self.output_queue:
-            self.output_queue.put("\n✗ KILLING PROCESS (Ctrl+C)...")
+            self.output_queue.put("\n✗ KILLING PROCESS (all children processes)...")
         
         try:
             pid = self.process.pid
             print(f"[KILL] Got PID={pid}"); sys.stdout.flush()
             
-            # Try to kill the PROCESS GROUP (not just the shell)
-            # This is the key - when shell=True, we need to kill the group
-            print(f"[KILL] Trying to get process group..."); sys.stdout.flush()
+            # Get process group ID - with preexec_fn=os.setsid, this process has its own group
+            # Killing the group will kill this process AND all child processes
             try:
                 pgid = os.getpgid(pid)
                 print(f"[KILL] Got PGID={pgid}"); sys.stdout.flush()
-                
-                # SIGINT to the process group (like Ctrl+C)
-                print(f"[KILL] Sending SIGINT to group {pgid}"); sys.stdout.flush()
+            except OSError as e:
+                print(f"[KILL] Could not get PGID: {e}, using PID as fallback"); sys.stdout.flush()
+                pgid = pid
+            
+            # Step 1: Send SIGINT (like Ctrl+C) to the entire process group
+            print(f"[KILL] Sending SIGINT to process group {pgid}"); sys.stdout.flush()
+            try:
                 os.killpg(pgid, signal.SIGINT)
-                print(f"[KILL] SIGINT sent!"); sys.stdout.flush()
-                
                 if self.output_queue:
                     self.output_queue.put(f"[1] Sent SIGINT to process group {pgid}")
-                
                 time.sleep(0.5)
-                
-                if self.process.poll() is not None:
-                    print(f"[KILL] Process dead after SIGINT"); sys.stdout.flush()
-                    if self.output_queue:
-                        self.output_queue.put(f"✓ Process exited (code: {self.process.returncode})")
-                    return
-                    
-                # Try SIGTERM
-                print(f"[KILL] Sending SIGTERM to group..."); sys.stdout.flush()
+            except Exception as e:
+                print(f"[KILL] SIGINT failed: {e}"); sys.stdout.flush()
+            
+            if self.process.poll() is not None:
+                print(f"[KILL] Process dead after SIGINT"); sys.stdout.flush()
+                if self.output_queue:
+                    self.output_queue.put(f"✓ Process exited (code: {self.process.returncode})")
+                return
+            
+            # Step 2: Send SIGTERM (graceful termination)
+            print(f"[KILL] Sending SIGTERM to process group {pgid}"); sys.stdout.flush()
+            try:
                 os.killpg(pgid, signal.SIGTERM)
-                print(f"[KILL] SIGTERM sent!"); sys.stdout.flush()
-                
                 if self.output_queue:
-                    self.output_queue.put(f"[2] Sent SIGTERM")
-                
+                    self.output_queue.put(f"[2] Sent SIGTERM to process group {pgid}")
                 time.sleep(0.5)
-                
-                if self.process.poll() is not None:
-                    print(f"[KILL] Process dead after SIGTERM"); sys.stdout.flush()
-                    if self.output_queue:
-                        self.output_queue.put(f"✓ Process terminated (code: {self.process.returncode})")
-                    return
-                
-                # Try SIGKILL
-                print(f"[KILL] Sending SIGKILL to group..."); sys.stdout.flush()
+            except Exception as e:
+                print(f"[KILL] SIGTERM failed: {e}"); sys.stdout.flush()
+            
+            if self.process.poll() is not None:
+                print(f"[KILL] Process dead after SIGTERM"); sys.stdout.flush()
+                if self.output_queue:
+                    self.output_queue.put(f"✓ Process terminated (code: {self.process.returncode})")
+                return
+            
+            # Step 3: Send SIGKILL (forcefully kill entire process group)
+            print(f"[KILL] Sending SIGKILL to process group {pgid}"); sys.stdout.flush()
+            try:
                 os.killpg(pgid, signal.SIGKILL)
-                print(f"[KILL] SIGKILL sent!"); sys.stdout.flush()
-                
                 if self.output_queue:
-                    self.output_queue.put(f"[3] Sent SIGKILL")
-                
+                    self.output_queue.put(f"[3] Sent SIGKILL to process group {pgid}")
                 time.sleep(0.2)
-                
-                final_code = self.process.poll()
-                print(f"[KILL] Final poll: {final_code}"); sys.stdout.flush()
-                
-                if final_code is not None:
-                    if self.output_queue:
-                        self.output_queue.put(f"✓ Process killed (code: {final_code})")
-                else:
-                    if self.output_queue:
-                        self.output_queue.put("ERROR: Process still alive after SIGKILL!")
-                        
-            except OSError as e:
-                print(f"[KILL] OSError getting PGID: {e}"); sys.stdout.flush()
-                # Fallback: try direct kill on PID
+            except Exception as e:
+                print(f"[KILL] SIGKILL failed: {e}"); sys.stdout.flush()
+            
+            final_code = self.process.poll()
+            print(f"[KILL] Final poll: {final_code}"); sys.stdout.flush()
+            
+            if final_code is not None:
                 if self.output_queue:
-                    self.output_queue.put(f"Fallback: trying direct kill on PID {pid}")
-                os.kill(pid, signal.SIGINT)
-                time.sleep(0.3)
-                if self.process.poll() is None:
-                    os.kill(pid, signal.SIGTERM)
-                    time.sleep(0.3)
-                if self.process.poll() is None:
-                    os.kill(pid, signal.SIGKILL)
+                    self.output_queue.put(f"✓ All processes killed (code: {final_code})")
+            else:
+                if self.output_queue:
+                    self.output_queue.put("ERROR: Process still alive after SIGKILL!")
                     
         except Exception as e:
             print(f"[KILL] Exception: {e}"); sys.stdout.flush()
