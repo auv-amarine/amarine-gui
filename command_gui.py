@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QTabWidget, QTextEdit, QLabel, QComboBox, QStyleFactory,
     QSplitter
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QIcon, QTextCursor, QColor
 
 # ANSI Color codes to QColor map
@@ -64,13 +64,11 @@ COMMANDS = {
         "RQT Image View": "ros2 run rqt_image_view rqt_image_view",
     },
     "ArduPilot": {
-        "--- SITL ---": "",  # Visual separator
         "Start SITL": "cd ~/ardupilot && Tools/autotest/sim_vehicle.py -L RATBeach -v ArduSub -f vectored --model=JSON --out=udp:0.0.0.0:14550 --console",
         "--- MAVRoS ---": "",  # Visual separator
         "Launch MAVRoS": "ros2 launch mavros apm.launch fcu_url:=udp://:14550@localhost:14555",
     },
     "ROS2": {
-        "--- Build Package ---": "",  # Visual separator
         "Build Package": "cd ~/ros2_ws && colcon build --packages-select sauvc26_code",
         "--- Mission Control ---": "",  # Visual separator
         "Arm": "ros2 run sauvc26_code arm",
@@ -243,6 +241,7 @@ class CommandButtonWidget(QWidget):
         self.cmd_btn = QPushButton(cmd_name)
         self.cmd_btn.setFont(QFont("Arial", 10))
         self.cmd_btn.setMinimumHeight(40)
+        self.cmd_btn.setMaximumHeight(80)
         self.cmd_btn.clicked.connect(self._on_cmd_clicked)
         layout.addWidget(self.cmd_btn, 1)
         
@@ -250,6 +249,7 @@ class CommandButtonWidget(QWidget):
         self.kill_btn = QPushButton("✕")
         self.kill_btn.setFont(QFont("Arial", 12, QFont.Bold))
         self.kill_btn.setMaximumWidth(45)
+        self.kill_btn.setMinimumHeight(40)
         self.kill_btn.setStyleSheet("background-color: #ff6b6b; color: white;")
         self.kill_btn.clicked.connect(self._on_kill_clicked)
         self.kill_btn.hide()  # Hidden by default
@@ -406,12 +406,8 @@ class ROS2CommandGUI(QMainWindow):
                     is_separator = cmd_string == ""
                     
                     if is_separator:
-                        # Make separator unclickable
-                        sep_btn = QPushButton(cmd_name)
-                        sep_btn.setEnabled(False)
-                        sep_btn.setFont(QFont("Arial", 10))
-                        sep_btn.setMinimumHeight(40)
-                        left_layout.addWidget(sep_btn)
+                        # Add spacer instead of separator button (height matches button)
+                        left_layout.addSpacing(80)
                     else:
                         # Create composite widget (button + dynamic kill)
                         cmd_widget = CommandButtonWidget(
@@ -487,7 +483,7 @@ class ROS2CommandGUI(QMainWindow):
         tab_container = QWidget()
         main_layout = QHBoxLayout(tab_container)
 
-        # Left side - Command buttons
+        # Left side - Command buttons in 2 weighted sections
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
@@ -496,16 +492,17 @@ class ROS2CommandGUI(QMainWindow):
         title.setFont(QFont("Arial", 12, QFont.Bold))
         left_layout.addWidget(title)
 
-        # Buttons for each command
+        # SITL Section with weight
+        sitl_section = QWidget()
+        sitl_section_layout = QVBoxLayout(sitl_section)
+        sitl_section_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Buttons for SITL
         for cmd_name, cmd_string in commands.items():
-            is_separator = cmd_string == ""
-            
-            if is_separator:
-                sep_btn = QPushButton(cmd_name)
-                sep_btn.setEnabled(False)
-                sep_btn.setFont(QFont("Arial", 10))
-                sep_btn.setMinimumHeight(40)
-                left_layout.addWidget(sep_btn)
+            if cmd_name == "--- SITL ---":
+                sitl_section_layout.addSpacing(0)  # No visible spacer, use layout spacing
+            elif cmd_name.startswith("--- "):
+                break  # Stop at next section
             else:
                 # Create composite widget (button + dynamic kill)
                 cmd_widget = CommandButtonWidget(
@@ -513,17 +510,47 @@ class ROS2CommandGUI(QMainWindow):
                     on_run=lambda name, cmd=cmd_string: self.on_command_start("ArduPilot", cmd, name),
                     on_kill=lambda name: self.on_command_kill("ArduPilot", name)
                 )
-                left_layout.addWidget(cmd_widget)
+                sitl_section_layout.addWidget(cmd_widget)
                 
                 # Store widget for later access
                 if "ArduPilot" not in self.command_widgets:
                     self.command_widgets["ArduPilot"] = {}
                 self.command_widgets["ArduPilot"][cmd_name] = cmd_widget
-
-        # Spacer
-        left_layout.addStretch()
         
-        # Kill All button (legacy, kept for backup)
+        sitl_section_layout.addStretch()
+        left_layout.addWidget(sitl_section, 1)  # Give weight 1 to section
+
+        # MAVRoS Section with weight
+        mavros_section = QWidget()
+        mavros_section_layout = QVBoxLayout(mavros_section)
+        mavros_section_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Buttons for MAVRoS
+        found_mavros = False
+        for cmd_name, cmd_string in commands.items():
+            if cmd_name == "--- MAVRoS ---":
+                found_mavros = True
+                continue
+            elif found_mavros and cmd_string == "":
+                mavros_section_layout.addSpacing(0)
+            elif found_mavros:
+                # Create composite widget (button + dynamic kill)
+                cmd_widget = CommandButtonWidget(
+                    cmd_name,
+                    on_run=lambda name, cmd=cmd_string: self.on_command_start("ArduPilot", cmd, name),
+                    on_kill=lambda name: self.on_command_kill("ArduPilot", name)
+                )
+                mavros_section_layout.addWidget(cmd_widget)
+                
+                # Store widget for later access
+                if "ArduPilot" not in self.command_widgets:
+                    self.command_widgets["ArduPilot"] = {}
+                self.command_widgets["ArduPilot"][cmd_name] = cmd_widget
+        
+        mavros_section_layout.addStretch()
+        left_layout.addWidget(mavros_section, 1)  # Give weight 1 to section
+        
+        # Kill All button
         kill_btn = QPushButton("Kill All")
         kill_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
         kill_btn.clicked.connect(lambda checked: self.kill_terminal("ArduPilot"))
@@ -609,12 +636,12 @@ class ROS2CommandGUI(QMainWindow):
 
     def create_ros2_tab(self, commands):
         """Create ROS2 tab with 2 sections: Build Package and Mission Control
-        Each section has its own output terminal"""
+        Each section has its own output terminal with weighted layout for alignment"""
         # Create main container
         tab_container = QWidget()
         main_layout = QHBoxLayout(tab_container)
 
-        # Left side - Command buttons organized in 2 sections
+        # Left side - Command buttons in 2 weighted sections
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
@@ -623,57 +650,77 @@ class ROS2CommandGUI(QMainWindow):
         title.setFont(QFont("Arial", 12, QFont.Bold))
         left_layout.addWidget(title)
 
-        # Section 1: Build Package
-        section1_label = QLabel("Build Package")
-        section1_label.setFont(QFont("Arial", 10, QFont.Bold))
-        left_layout.addWidget(section1_label)
+        # Build Package Section with weight
+        build_section = QWidget()
+        build_section_layout = QVBoxLayout(build_section)
+        build_section_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Section label
+        build_label = QLabel("Build Package")
+        build_label.setFont(QFont("Arial", 10, QFont.Bold))
+        build_section_layout.addWidget(build_label)
 
         # Store buttons for Section 1
         if "ROS2_Section1" not in self.section_groups:
             self.section_groups["ROS2_Section1"] = []
 
-        # Section 2: Mission Control
-        section2_label = QLabel("Mission Control")
-        section2_label.setFont(QFont("Arial", 10, QFont.Bold))
-        left_layout.addWidget(section2_label)
-
-        # Store buttons for Section 2
-        if "ROS2_Section2" not in self.section_groups:
-            self.section_groups["ROS2_Section2"] = []
-
-        # Process commands and add to sections
+        # Process Build Package commands
+        found_build = False
         for cmd_name, cmd_string in commands.items():
-            is_separator = cmd_string == ""
-            
-            if is_separator:
-                # Separator (non-clickable)
-                sep_btn = QPushButton(cmd_name)
-                sep_btn.setEnabled(False)
-                sep_btn.setFont(QFont("Arial", 10))
-                sep_btn.setMinimumHeight(40)
-                left_layout.addWidget(sep_btn)
-            else:
-                # Create composite widget (button + dynamic kill)
+            if "Build Package" in cmd_name and cmd_string != "":
+                found_build = True
                 cmd_widget = CommandButtonWidget(
                     cmd_name,
                     on_run=lambda name, cmd=cmd_string: self.on_ros2_command_start(name, cmd),
                     on_kill=lambda name: self.on_command_kill("ROS2", name)
                 )
-                left_layout.addWidget(cmd_widget)
+                build_section_layout.addWidget(cmd_widget)
                 
                 # Store widget for later access
                 if "ROS2" not in self.command_widgets:
                     self.command_widgets["ROS2"] = {}
                 self.command_widgets["ROS2"][cmd_name] = cmd_widget
-                
-                # Assign to correct section
-                if "Build Package" in cmd_name or cmd_name == "Build Package":
-                    self.section_groups["ROS2_Section1"].append(cmd_widget)
-                elif cmd_name in ["Arm", "Qualification", "Final", "Test"]:
-                    self.section_groups["ROS2_Section2"].append(cmd_widget)
+                self.section_groups["ROS2_Section1"].append(cmd_widget)
+        
+        build_section_layout.addStretch()
+        left_layout.addWidget(build_section, 1)  # Give weight 1 to section
 
-        # Spacer
-        left_layout.addStretch()
+        # Mission Control Section with weight
+        mission_section = QWidget()
+        mission_section_layout = QVBoxLayout(mission_section)
+        mission_section_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Section label
+        mission_label = QLabel("Mission Control")
+        mission_label.setFont(QFont("Arial", 10, QFont.Bold))
+        mission_section_layout.addWidget(mission_label)
+
+        # Store buttons for Section 2
+        if "ROS2_Section2" not in self.section_groups:
+            self.section_groups["ROS2_Section2"] = []
+
+        # Process Mission Control commands
+        found_mission = False
+        for cmd_name, cmd_string in commands.items():
+            if cmd_name == "--- Mission Control ---":
+                found_mission = True
+                continue
+            elif found_mission and cmd_string != "" and cmd_name in ["Arm", "Qualification", "Final", "Test"]:
+                cmd_widget = CommandButtonWidget(
+                    cmd_name,
+                    on_run=lambda name, cmd=cmd_string: self.on_ros2_command_start(name, cmd),
+                    on_kill=lambda name: self.on_command_kill("ROS2", name)
+                )
+                mission_section_layout.addWidget(cmd_widget)
+                
+                # Store widget for later access
+                if "ROS2" not in self.command_widgets:
+                    self.command_widgets["ROS2"] = {}
+                self.command_widgets["ROS2"][cmd_name] = cmd_widget
+                self.section_groups["ROS2_Section2"].append(cmd_widget)
+        
+        mission_section_layout.addStretch()
+        left_layout.addWidget(mission_section, 1)  # Give weight 1 to section
         
         # Kill All button
         kill_btn = QPushButton("Kill All")
