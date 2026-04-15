@@ -58,6 +58,7 @@ COMMANDS = {
     },
     "Vision": {
         "Docker Container": "docker start -ai be537dc7c441",
+        "Front Camera Bridge": "ros2 run ros_gz_bridge parameter_bridge '/front_camera@sensor_msgs/msg/Image@gz.msgs.Image'",
     },
     "RQT": {
         "RQT Image View": "ros2 run rqt_image_view rqt_image_view",
@@ -69,14 +70,13 @@ COMMANDS = {
         "Launch MAVRoS": "ros2 launch mavros apm.launch fcu_url:=udp://:14550@localhost:14555",
     },
     "ROS2": {
-        "Front Camera Bridge": "ros2 run ros_gz_bridge parameter_bridge '/front_camera@sensor_msgs/msg/Image@gz.msgs.Image'",
+        "--- Build Package ---": "",  # Visual separator
         "Build Package": "cd ~/ros2_ws && colcon build --packages-select sauvc26_code",
+        "--- Mission Control ---": "",  # Visual separator
         "Arm": "ros2 run sauvc26_code arm",
         "Qualification": "ros2 run sauvc26_code qualification",
         "Final": "ros2 run sauvc26_code final",
-        "Move": "ros2 run sauvc26_code move",
         "Test": "ros2 run sauvc26_code test",
-        "Teleop Keyboard": "ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/mavros/setpoint_velocity/cmd_vel_unstamped",
     }
 }
 
@@ -291,6 +291,7 @@ class ROS2CommandGUI(QMainWindow):
         self.executors = {}  # Store executors for each category
         self.command_output_map = {}  # Map command name to its output widget key
         self.command_widgets = {}  # Store CommandButtonWidget instances
+        self.section_groups = {}  # Track button groups by section for disabling
         self.init_ui()
         
         # Start a timer to process output queues
@@ -362,16 +363,26 @@ class ROS2CommandGUI(QMainWindow):
                     if executor and executor.process and executor.process.poll() is not None:
                         if cmd_widget.is_running:
                             cmd_widget.set_running(False)
+                            
+                            # Update ROS2 section buttons if process in ROS2
+                            if category == "ROS2":
+                                self._update_ros2_section_buttons()
 
     def create_tabs(self):
         """Create tabs for each category with separate output terminals"""
+        # Pre-set command_output_map for commands without console
+        self.command_output_map["Front Camera Bridge"] = None  # No output for Front Camera
+        
         for category, commands in COMMANDS.items():
             # Check if this category should display output
-            has_output = category != "RQT"
+            has_output = category not in ["RQT"]
             
             # Special handling for ArduPilot (2 output terminals)
             if category == "ArduPilot":
                 self.create_ardupilot_tab(commands)
+            # Special handling for ROS2 (2 sections with single output terminal)
+            elif category == "ROS2":
+                self.create_ros2_tab(commands)
             else:
                 # Create main container for this category
                 tab_container = QWidget()
@@ -596,6 +607,159 @@ class ROS2CommandGUI(QMainWindow):
         # Add tab
         self.tab_widget.addTab(tab_container, "ArduPilot")
 
+    def create_ros2_tab(self, commands):
+        """Create ROS2 tab with 2 sections: Build Package and Mission Control
+        Each section has its own output terminal"""
+        # Create main container
+        tab_container = QWidget()
+        main_layout = QHBoxLayout(tab_container)
+
+        # Left side - Command buttons organized in 2 sections
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+
+        # Title
+        title = QLabel("ROS2")
+        title.setFont(QFont("Arial", 12, QFont.Bold))
+        left_layout.addWidget(title)
+
+        # Section 1: Build Package
+        section1_label = QLabel("Build Package")
+        section1_label.setFont(QFont("Arial", 10, QFont.Bold))
+        left_layout.addWidget(section1_label)
+
+        # Store buttons for Section 1
+        if "ROS2_Section1" not in self.section_groups:
+            self.section_groups["ROS2_Section1"] = []
+
+        # Section 2: Mission Control
+        section2_label = QLabel("Mission Control")
+        section2_label.setFont(QFont("Arial", 10, QFont.Bold))
+        left_layout.addWidget(section2_label)
+
+        # Store buttons for Section 2
+        if "ROS2_Section2" not in self.section_groups:
+            self.section_groups["ROS2_Section2"] = []
+
+        # Process commands and add to sections
+        for cmd_name, cmd_string in commands.items():
+            is_separator = cmd_string == ""
+            
+            if is_separator:
+                # Separator (non-clickable)
+                sep_btn = QPushButton(cmd_name)
+                sep_btn.setEnabled(False)
+                sep_btn.setFont(QFont("Arial", 10))
+                sep_btn.setMinimumHeight(40)
+                left_layout.addWidget(sep_btn)
+            else:
+                # Create composite widget (button + dynamic kill)
+                cmd_widget = CommandButtonWidget(
+                    cmd_name,
+                    on_run=lambda name, cmd=cmd_string: self.on_ros2_command_start(name, cmd),
+                    on_kill=lambda name: self.on_command_kill("ROS2", name)
+                )
+                left_layout.addWidget(cmd_widget)
+                
+                # Store widget for later access
+                if "ROS2" not in self.command_widgets:
+                    self.command_widgets["ROS2"] = {}
+                self.command_widgets["ROS2"][cmd_name] = cmd_widget
+                
+                # Assign to correct section
+                if "Build Package" in cmd_name or cmd_name == "Build Package":
+                    self.section_groups["ROS2_Section1"].append(cmd_widget)
+                elif cmd_name in ["Arm", "Qualification", "Final", "Test"]:
+                    self.section_groups["ROS2_Section2"].append(cmd_widget)
+
+        # Spacer
+        left_layout.addStretch()
+        
+        # Kill All button
+        kill_btn = QPushButton("Kill All")
+        kill_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
+        kill_btn.clicked.connect(lambda checked: self.kill_terminal("ROS2"))
+        left_layout.addWidget(kill_btn)
+
+        # Right side - 2 output terminals stacked vertically (Build Package and Mission Control)
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+
+        # Build Package Terminal
+        build_layout = QVBoxLayout()
+        build_label = QLabel("Build Package Output")
+        build_label.setFont(QFont("Arial", 10, QFont.Bold))
+        build_layout.addWidget(build_label)
+
+        build_text = QTextEdit()
+        build_text.setReadOnly(True)
+        build_text.setFont(QFont("Courier", 9))
+        build_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #333;
+            }
+        """)
+        build_layout.addWidget(build_text)
+
+        build_clear_btn = QPushButton("Clear")
+        build_clear_btn.clicked.connect(build_text.clear)
+        build_layout.addWidget(build_clear_btn)
+
+        # Store Build Package output widget and queue
+        self.output_widgets["ROS2_Build"] = build_text
+        self.output_queues["ROS2_Build"] = Queue()
+        
+        # Assign Build Package command to Build output
+        self.command_output_map["Build Package"] = "ROS2_Build"
+
+        # Mission Control Terminal
+        mission_layout = QVBoxLayout()
+        mission_label = QLabel("Mission Control Output")
+        mission_label.setFont(QFont("Arial", 10, QFont.Bold))
+        mission_layout.addWidget(mission_label)
+
+        mission_text = QTextEdit()
+        mission_text.setReadOnly(True)
+        mission_text.setFont(QFont("Courier", 9))
+        mission_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #333;
+            }
+        """)
+        mission_layout.addWidget(mission_text)
+
+        mission_clear_btn = QPushButton("Clear")
+        mission_clear_btn.clicked.connect(mission_text.clear)
+        mission_layout.addWidget(mission_clear_btn)
+
+        # Store Mission Control output widget and queue
+        self.output_widgets["ROS2_Mission"] = mission_text
+        self.output_queues["ROS2_Mission"] = Queue()
+        
+        # Assign Mission Control commands to Mission output
+        for cmd in ["Arm", "Qualification", "Final", "Test"]:
+            self.command_output_map[cmd] = "ROS2_Mission"
+
+        # Add both terminals to right layout vertically
+        build_widget = QWidget()
+        build_widget.setLayout(build_layout)
+        mission_widget = QWidget()
+        mission_widget.setLayout(mission_layout)
+        
+        right_layout.addWidget(build_widget, 1)
+        right_layout.addWidget(mission_widget, 1)
+
+        # Add left and right to main layout
+        main_layout.addWidget(left_widget, 1)
+        main_layout.addWidget(right_container, 2)
+
+        # Add tab
+        self.tab_widget.addTab(tab_container, "ROS2")
+
     def on_command_start(self, category, command, name):
         """Handle command start - auto-kill previous command if running"""
         # SKIP auto-kill for ArduPilot (has 2 separate terminals, allows both to run)
@@ -636,9 +800,64 @@ class ROS2CommandGUI(QMainWindow):
                         cmd_btn = self.command_widgets[category].get(name)
                         if cmd_btn:
                             cmd_btn.set_running(False)
+                    
+                    # Re-enable buttons in section if ROS2
+                    if category == "ROS2":
+                        self._update_ros2_section_buttons()
                 
                 threading.Thread(target=reset_button, daemon=True).start()
 
+    def on_ros2_command_start(self, name, command):
+        """Handle ROS2 command start with section-based button disabling
+        Mission Control section buttons are disabled when one is running"""
+        
+        # Find which section this command belongs to
+        section_key = None
+        if name == "Build Package":
+            section_key = "ROS2_Section1"
+        elif name in ["Arm", "Qualification", "Final", "Test"]:
+            section_key = "ROS2_Section2"
+        
+        # If this is a Mission Control command, kill any other running in same section
+        if section_key == "ROS2_Section2":
+            for cmd_key, executor in list(self.executors.items()):
+                if cmd_key.startswith("ROS2_"):
+                    cmd_name_in_key = cmd_key.replace("ROS2_", "")
+                    # Only kill if it's in the same section and different command
+                    if cmd_name_in_key in ["Arm", "Qualification", "Final", "Test"] and cmd_name_in_key != name:
+                        if executor and executor.process and executor.process.poll() is None:
+                            print(f"[AUTO-KILL-ROS2] Killing {cmd_key} to start ROS2_{name}")
+                            executor.kill_process()
+                            time.sleep(0.3)
+                            
+                            # Reset button state
+                            if "ROS2" in self.command_widgets and cmd_name_in_key in self.command_widgets["ROS2"]:
+                                self.command_widgets["ROS2"][cmd_name_in_key].set_running(False)
+        
+        # Run the new command
+        self.run_command("ROS2", command, name)
+        
+        # Update section button states
+        self._update_ros2_section_buttons()
+    
+    def _update_ros2_section_buttons(self):
+        """Update ROS2 section button enabled/disabled states based on running processes"""
+        # Check if any Mission Control command is running
+        mission_running = False
+        for cmd_key in self.executors.keys():
+            if cmd_key.startswith("ROS2_"):
+                cmd_name = cmd_key.replace("ROS2_", "")
+                if cmd_name in ["Arm", "Qualification", "Final", "Test"]:
+                    executor = self.executors[cmd_key]
+                    if executor and executor.process and executor.process.poll() is None:
+                        mission_running = True
+                        break
+        
+        # Disable/enable Mission Control buttons based on running state
+        if "ROS2_Section2" in self.section_groups:
+            for cmd_widget in self.section_groups["ROS2_Section2"]:
+                cmd_widget.set_enabled(not mission_running)
+    
     def run_command(self, category, command, name):
         """Run command in separate thread for specific category"""
         
