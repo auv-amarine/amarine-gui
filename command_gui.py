@@ -486,14 +486,17 @@ class CompactCommandGUI(QMainWindow):
         # 6 Template buttons (3x2)
         template_grid2 = QGridLayout()
         template_grid2.setSpacing(5)
+        
+        button_labels = ["Open RQT", "Open RVIZ", "Open Qground", "Open Vscode", "Open Terminal", "Open BLHeli"]
 
         for row in range(3):
             for col in range(2):
-                btn = QPushButton("")
+                idx = row * 2 + col
+                btn = QPushButton(button_labels[idx])
                 btn.setMinimumHeight(40)
                 btn.setFont(QFont("Ubuntu", 9))
-                btn.clicked.connect(lambda checked, b=btn: self._toggle_template_button(b, 100 + row * 2 + col))
-                self.template_buttons[100 + row * 2 + col] = {'button': btn, 'is_running': False, 'executor': None}
+                btn.clicked.connect(lambda checked, b=btn, i=idx: self._on_utility_button_clicked(i))
+                self.template_buttons[100 + idx] = {'button': btn, 'is_running': False, 'executor': None}
                 template_grid2.addWidget(btn, row, col)
 
         col2_layout.addLayout(template_grid2)
@@ -714,6 +717,23 @@ class CompactCommandGUI(QMainWindow):
                 thread = threading.Thread(target=executor.run_command, args=(command,))
                 thread.daemon = True
                 thread.start()
+
+    def _on_utility_button_clicked(self, button_idx):
+        """Handle utility button clicks to open applications"""
+        commands_map = {
+            0: "rqt",
+            1: "rviz2",
+            2: "qgroundcontrol",
+            3: "code ~/ros2_ws",
+            4: "terminator",
+            5: "BLHeliSuite32"
+        }
+        
+        if button_idx in commands_map:
+            command = commands_map[button_idx]
+            thread = threading.Thread(target=lambda: subprocess.Popen(command, shell=True))
+            thread.daemon = True
+            thread.start()
 
     def _set_button_state(self, button, is_running, text):
         """Set button styling based on running state"""
