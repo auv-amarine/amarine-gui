@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ROS2 Command GUI - Interface to run commands from bashrc
-Grouped by categories: Gazebo, Vision, ArduPilot, and ROS2
+ROS2 Command GUI - Compact Version
+Streamlined interface for AMarineUV team with monitoring
 """
 
 import sys
@@ -12,6 +12,7 @@ import warnings
 import time
 import signal
 import re
+import psutil
 from threading import Lock
 from queue import Queue
 
@@ -19,8 +20,8 @@ from queue import Queue
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTabWidget, QTextEdit, QLabel, QComboBox, QStyleFactory,
-    QSplitter
+    QPushButton, QTextEdit, QLabel, QComboBox, QStyleFactory,
+    QGridLayout, QFrame
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QIcon, QTextCursor, QColor
@@ -47,35 +48,38 @@ ANSI_COLORS = {
 
 def strip_ansi(text):
     """Remove ANSI color codes from text"""
-    # Remove all ANSI escape sequences
     return re.sub(r'\033\[[0-9;]*m|\x1b\[[0-9;]*m', '', text)
 
 # Mapping commands from bashrc
 COMMANDS = {
     "Gazebo": {
-        "Qualification World": "gz sim -v 3 -r sauvc_qualification.world",
-        "Final World": "gz sim -v 3 -r sauvc_final.world",
+        "Qualification": "gz sim -v 3 -r sauvc_qualification.world",
+        "Final": "gz sim -v 3 -r sauvc_final.world",
     },
     "Vision": {
         "Docker Container": "docker start -ai be537dc7c441",
-        "Front Camera Bridge": "ros2 run ros_gz_bridge parameter_bridge '/front_camera@sensor_msgs/msg/Image@gz.msgs.Image'",
-    },
-    "RQT": {
-        "RQT Image View": "ros2 run rqt_image_view rqt_image_view",
     },
     "ArduPilot": {
-        "Start SITL": "cd ~/ardupilot && Tools/autotest/sim_vehicle.py -L RATBeach -v ArduSub -f vectored --model=JSON --out=udp:0.0.0.0:14550 --console",
-        "--- MAVRoS ---": "",  # Visual separator
-        "Launch MAVRoS": "ros2 launch mavros apm.launch fcu_url:=udp://:14550@localhost:14555",
+        "SITL": "cd ~/ardupilot && Tools/autotest/sim_vehicle.py -L RATBeach -v ArduSub -f vectored --model=JSON --out=udp:0.0.0.0:14550 --console",
+    },
+    "MAVRoS": {
+        "MAVRoS": "ros2 launch mavros apm.launch fcu_url:=udp://:14550@localhost:14555",
     },
     "ROS2": {
-        "Build Package": "cd ~/ros2_ws && colcon build --packages-select sauvc26_code",
-        "--- Mission Control ---": "",  # Visual separator
+        "Build": "cd ~/ros2_ws && colcon build --packages-select sauvc26_code",
+        "Test": "ros2 run sauvc26_code test",
         "Arm": "ros2 run sauvc26_code arm",
         "Qualification": "ros2 run sauvc26_code qualification",
         "Final": "ros2 run sauvc26_code final",
-        "Test": "ros2 run sauvc26_code test",
     }
+}
+
+# Jetson Orin Nano Power Modes
+POWER_MODES = {
+    "1": "nvpmodel -m 0",  # 15W
+    "2": "nvpmodel -m 1",  # 25W
+    "3": "nvpmodel -m 2",  # 30W
+    "Max": "nvpmodel -m 3",  # 40W (if available)
 }
 
 
@@ -84,7 +88,8 @@ class CommandExecutor:
 
     def __init__(self, output_queue=None):
         self.process = None
-        self.output_queue = output_queue  # Queue for posting output
+        self.output_queue = output_queue
+        self.is_running = False
 
     def append_to_queue(self, text):
         """Post text to output queue"""
@@ -94,16 +99,14 @@ class CommandExecutor:
     def run_command(self, command):
         """Run command and post output to queue"""
         try:
+            self.is_running = True
             text = f"▶ Running: {command}\n"
             self.append_to_queue(text)
             self.append_to_queue("─" * 80)
 
-            # Set up environment for unbuffered output
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'
 
-            # Run command using shell, with new process group for proper cleanup
-            # preexec_fn=os.setsid creates a new session, so killpg only affects this command
             self.process = subprocess.Popen(
                 command,
                 shell=True,
@@ -116,7 +119,6 @@ class CommandExecutor:
                 env=env
             )
 
-            # Read output in real-time
             try:
                 if self.process.stdout:
                     while True:
@@ -124,10 +126,9 @@ class CommandExecutor:
                             line = self.process.stdout.readline()
                             if not line:
                                 break
-                            if line.strip():  # Only append non-empty lines
+                            if line.strip():
                                 self.append_to_queue(line)
                         except ValueError:
-                            # This happens when stdout is closed (process killed)
                             break
             except Exception as e:
                 pass
@@ -135,875 +136,723 @@ class CommandExecutor:
             self.process.wait()
             self.append_to_queue("─" * 80)
             self.append_to_queue(f"✓ Command finished (exit code: {self.process.returncode})\n")
+            self.is_running = False
 
         except Exception as e:
             self.append_to_queue(f"✗ Error: {str(e)}\n")
+            self.is_running = False
 
     def kill_process(self):
-        """Kill the running process and all its children like Ctrl+C in terminal"""
+        """Kill the running process and all its children"""
         if not self.process:
-            print("[KILL] No process"); sys.stdout.flush()
             return
-        
-        print(f"[KILL] START - PID={self.process.pid}"); sys.stdout.flush()
-        
+
         if self.output_queue:
             self.output_queue.put("\n✗ KILLING PROCESS (all children processes)...")
-        
+
         try:
             pid = self.process.pid
-            print(f"[KILL] Got PID={pid}"); sys.stdout.flush()
-            
-            # Get process group ID - with preexec_fn=os.setsid, this process has its own group
-            # Killing the group will kill this process AND all child processes
             try:
                 pgid = os.getpgid(pid)
-                print(f"[KILL] Got PGID={pgid}"); sys.stdout.flush()
-            except OSError as e:
-                print(f"[KILL] Could not get PGID: {e}, using PID as fallback"); sys.stdout.flush()
+            except OSError:
                 pgid = pid
-            
-            # Step 1: Send SIGINT (like Ctrl+C) to the entire process group
-            print(f"[KILL] Sending SIGINT to process group {pgid}"); sys.stdout.flush()
+
+            # Step 1: SIGINT
             try:
                 os.killpg(pgid, signal.SIGINT)
                 if self.output_queue:
                     self.output_queue.put(f"[1] Sent SIGINT to process group {pgid}")
                 time.sleep(0.5)
-            except Exception as e:
-                print(f"[KILL] SIGINT failed: {e}"); sys.stdout.flush()
-            
+            except Exception:
+                pass
+
             if self.process.poll() is not None:
-                print(f"[KILL] Process dead after SIGINT"); sys.stdout.flush()
                 if self.output_queue:
                     self.output_queue.put(f"✓ Process exited (code: {self.process.returncode})")
+                self.is_running = False
                 return
-            
-            # Step 2: Send SIGTERM (graceful termination)
-            print(f"[KILL] Sending SIGTERM to process group {pgid}"); sys.stdout.flush()
+
+            # Step 2: SIGTERM
             try:
                 os.killpg(pgid, signal.SIGTERM)
                 if self.output_queue:
                     self.output_queue.put(f"[2] Sent SIGTERM to process group {pgid}")
                 time.sleep(0.5)
-            except Exception as e:
-                print(f"[KILL] SIGTERM failed: {e}"); sys.stdout.flush()
-            
+            except Exception:
+                pass
+
             if self.process.poll() is not None:
-                print(f"[KILL] Process dead after SIGTERM"); sys.stdout.flush()
                 if self.output_queue:
                     self.output_queue.put(f"✓ Process terminated (code: {self.process.returncode})")
+                self.is_running = False
                 return
-            
-            # Step 3: Send SIGKILL (forcefully kill entire process group)
-            print(f"[KILL] Sending SIGKILL to process group {pgid}"); sys.stdout.flush()
+
+            # Step 3: SIGKILL
             try:
                 os.killpg(pgid, signal.SIGKILL)
                 if self.output_queue:
                     self.output_queue.put(f"[3] Sent SIGKILL to process group {pgid}")
                 time.sleep(0.2)
-            except Exception as e:
-                print(f"[KILL] SIGKILL failed: {e}"); sys.stdout.flush()
-            
+            except Exception:
+                pass
+
             final_code = self.process.poll()
-            print(f"[KILL] Final poll: {final_code}"); sys.stdout.flush()
-            
             if final_code is not None:
                 if self.output_queue:
                     self.output_queue.put(f"✓ All processes killed (code: {final_code})")
             else:
                 if self.output_queue:
                     self.output_queue.put("ERROR: Process still alive after SIGKILL!")
-                    
+            
+            self.is_running = False
+
         except Exception as e:
-            print(f"[KILL] Exception: {e}"); sys.stdout.flush()
             if self.output_queue:
                 self.output_queue.put(f"Kill error: {str(e)}")
-        
-        print(f"[KILL] DONE"); sys.stdout.flush()
+            self.is_running = False
 
 
-class CommandButtonWidget(QWidget):
-    """Composite widget: command button + dynamic kill button when running"""
-    
-    def __init__(self, cmd_name, on_run, on_kill, parent=None):
+class ConsoleWidget(QFrame):
+    """Console output widget"""
+
+    def __init__(self, title="Console", parent=None):
         super().__init__(parent)
-        self.cmd_name = cmd_name
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Text edit
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setFont(QFont("Ubuntu Mono", 10))
+        self.text_edit.setStyleSheet("background-color: #000000; color: #CCCCCC;")
+        layout.addWidget(self.text_edit)
+
+    def append_text(self, text, color='#CCCCCC'):
+        """Append text with color"""
+        clean_text = strip_ansi(text)
+        self.text_edit.setTextColor(QColor(color))
+        self.text_edit.append(clean_text)
+
+
+class MonitoringPanel(QFrame):
+    """System monitoring panel (placeholder)"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        layout = QVBoxLayout(self)
+
+        # Title
+        title = QLabel("Monitoring")
+        title.setFont(QFont("Ubuntu", 10, QFont.Bold))
+        layout.addWidget(title)
+
+        # Monitoring items
+        self.stats = {
+            "CPU": QLabel("CPU: --"),
+            "GPU": QLabel("GPU: --"),
+            "Memory": QLabel("Memory: --"),
+            "Temp": QLabel("Temp: --"),
+            "Watt": QLabel("Watt: --"),
+        }
+
+        for key, label in self.stats.items():
+            label.setFont(QFont("Ubuntu Mono", 9))
+            layout.addWidget(label)
+
+        layout.addStretch()
+
+    def update_stats(self):
+        """Update monitoring stats"""
+        try:
+            cpu = psutil.cpu_percent(interval=0.1)
+            mem = psutil.virtual_memory()
+            self.stats["CPU"].setText(f"CPU: {cpu}%")
+            self.stats["Memory"].setText(f"Memory: {mem.percent}%")
+        except Exception:
+            pass
+
+
+class ROS2PackageWidget(QFrame):
+    """Widget for selecting and running ROS2 packages"""
+
+    def __init__(self, console_title, on_run, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
         self.on_run = on_run
-        self.on_kill = on_kill
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Dropdown layout
+        dropdown_layout = QHBoxLayout()
+        dropdown_layout.setSpacing(5)
+
+        self.package_combo = QComboBox()
+        self.package_combo.addItem("Select package...")
+        for package_name in COMMANDS["ROS2"].keys():
+            self.package_combo.addItem(package_name)
+        self.package_combo.setFont(QFont("Ubuntu", 10))
+        dropdown_layout.addWidget(self.package_combo)
+
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setMaximumWidth(70)
+        self.start_btn.setMaximumHeight(25)
+        self.start_btn.setMinimumHeight(25)
+        self.start_btn.setFont(QFont("Ubuntu", 8))
+        self.start_btn.clicked.connect(self._on_start_clicked)
+        dropdown_layout.addWidget(self.start_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setMaximumWidth(60)
+        clear_btn.setMaximumHeight(25)
+        clear_btn.setMinimumHeight(25)
+        clear_btn.setFont(QFont("Ubuntu", 8))
+        dropdown_layout.addWidget(clear_btn)
+
+        layout.addLayout(dropdown_layout)
+
+        # Console
+        self.console = ConsoleWidget("")
+        clear_btn.clicked.connect(self.console.text_edit.clear)
+        layout.addWidget(self.console)
+
+        self.executor = None
         self.is_running = False
-        
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-        
-        # Command button - fills available space
-        self.cmd_btn = QPushButton(cmd_name)
-        self.cmd_btn.setFont(QFont("Arial", 10))
-        self.cmd_btn.setMinimumHeight(40)
-        self.cmd_btn.setMaximumHeight(80)
-        self.cmd_btn.clicked.connect(self._on_cmd_clicked)
-        layout.addWidget(self.cmd_btn, 1)
-        
-        # Kill button - appears only when running
-        self.kill_btn = QPushButton("✕")
-        self.kill_btn.setFont(QFont("Arial", 12, QFont.Bold))
-        self.kill_btn.setMaximumWidth(45)
-        self.kill_btn.setMinimumHeight(40)
-        self.kill_btn.setStyleSheet("background-color: #ff6b6b; color: white;")
-        self.kill_btn.clicked.connect(self._on_kill_clicked)
-        self.kill_btn.hide()  # Hidden by default
-        layout.addWidget(self.kill_btn)
-    
-    def _on_cmd_clicked(self):
-        """Handle command button click"""
-        self.on_run(self.cmd_name)
-        self.set_running(True)
-    
-    def _on_kill_clicked(self):
-        """Handle kill button click"""
-        self.on_kill(self.cmd_name)
-        self.set_running(False)
-    
-    def set_running(self, is_running):
-        """Update state and show/hide kill button"""
-        self.is_running = is_running
-        if is_running:
-            self.cmd_btn.setStyleSheet("background-color: #4CAF50; color: white;")
-            self.kill_btn.show()
+
+    def _on_start_clicked(self):
+        """Handle start/kill button click"""
+        if self.is_running:
+            if self.executor:
+                self.executor.kill_process()
+            self._set_button_state(False, "Start")
+            self.is_running = False
         else:
-            self.cmd_btn.setStyleSheet("")
-            self.kill_btn.hide()
-    
-    def set_enabled(self, enabled):
-        """Enable/disable command button"""
-        self.cmd_btn.setEnabled(enabled)
+            package_name = self.package_combo.currentText()
+            if package_name in COMMANDS["ROS2"]:
+                command = COMMANDS["ROS2"][package_name]
+                self.on_run(package_name, command, self)
+                self._set_button_state(True, "Kill")
+                self.is_running = True
+
+    def _set_button_state(self, is_running, text):
+        """Set button styling based on running state"""
+        self.start_btn.setText(text)
+        if is_running:
+            # Kill button - red with bright hover, size stays same
+            self.start_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF4444;
+                    color: white;
+                    font-weight: bold;
+                    border-radius: 3px;
+                    padding: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #FF6666;
+                }
+            """)
+        else:
+            # Start button - normal
+            self.start_btn.setStyleSheet("")
+
+    def run_command(self, command):
+        """Run command in executor"""
+        output_queue = Queue()
+        self.executor = CommandExecutor(output_queue)
+
+        # Run in thread
+        thread = threading.Thread(target=self.executor.run_command, args=(command,))
+        thread.daemon = True
+        thread.start()
+
+        # Update console from queue
+        self.update_console_timer = QTimer()
+        self.update_console_timer.timeout.connect(lambda: self._process_queue(output_queue))
+        self.update_console_timer.start(100)
+
+    def _process_queue(self, output_queue):
+        """Process output queue"""
+        try:
+            while True:
+                text = output_queue.get_nowait()
+                color = '#CCCCCC'
+
+                if text.startswith('✓') or 'success' in text.lower():
+                    color = ANSI_COLORS['32']
+                elif text.startswith('✗') or 'error' in text.lower():
+                    color = ANSI_COLORS['91']
+                elif text.startswith('[') or '---' in text:
+                    color = ANSI_COLORS['36']
+
+                self.console.append_text(text, color)
+
+                if 'Command finished' in text or 'killed' in text.lower():
+                    self.is_running = False
+                    self._set_button_state(False, "Start")
+        except:
+            pass
 
 
-class ROS2CommandGUI(QMainWindow):
-    """Main GUI Application"""
+class CompactCommandGUI(QMainWindow):
+    """Main GUI window"""
 
     def __init__(self):
         super().__init__()
-        self.output_widgets = {}  # Store output text widgets for each category
-        self.output_queues = {}   # Store output queues for each category
-        self.worker_threads = {}  # Store worker threads for each category
-        self.executors = {}  # Store executors for each category
-        self.command_output_map = {}  # Map command name to its output widget key
-        self.command_widgets = {}  # Store CommandButtonWidget instances
-        self.section_groups = {}  # Track button groups by section for disabling
+        self.executors = {}
+        self.output_queues = {}
+        self.command_widgets = {}
+
         self.init_ui()
-        
-        # Start a timer to process output queues
-        self.queue_timer = QTimer()
-        self.queue_timer.timeout.connect(self.process_output_queues)
-        self.queue_timer.start(100)  # Process every 100ms
+        self.setup_monitoring()
 
     def init_ui(self):
         """Initialize UI"""
-        self.setWindowTitle("ROS2 Command GUI")
-        self.setGeometry(100, 100, 1200, 800)
-
-        # Set style
+        self.setWindowTitle("GUI Amarine v2.0")
+        self.setGeometry(100, 100, 560, 1000)
         QApplication.setStyle(QStyleFactory.create('Fusion'))
 
         # Main widget
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
 
-        # Main layout
-        layout = QVBoxLayout(main_widget)
+        # === TOP SECTION - Control Panel ===
+        top_layout = QHBoxLayout()
+        top_layout.setSpacing(2)
 
-        # Tab widget - each tab has its own commands and terminal
-        self.tab_widget = QTabWidget()
-        self.create_tabs()
-        layout.addWidget(self.tab_widget, 1)
+        # ===== COLUMN 1: GAZEBO & TEMPLATE BUTTONS =====
+        col1_frame = QFrame()
+        col1_layout = QVBoxLayout(col1_frame)
+        col1_layout.setSpacing(5)
 
-    def process_output_queues(self):
-        """Process output from all queues and update widgets"""
-        for output_key, output_queue in self.output_queues.items():
-            if output_queue and output_key in self.output_widgets:
-                output_widget = self.output_widgets[output_key]
-                try:
-                    while True:
-                        text = output_queue.get_nowait()
-                        # Clean ANSI codes
-                        clean_text = strip_ansi(text)
-                        
-                        # Check for common patterns and apply colors
-                        if clean_text.startswith('✓') or 'success' in clean_text.lower():
-                            output_widget.setTextColor(QColor(ANSI_COLORS['32']))  # Green
-                        elif clean_text.startswith('✗') or 'error' in clean_text.lower() or 'failed' in clean_text.lower():
-                            output_widget.setTextColor(QColor(ANSI_COLORS['91']))  # Bright red
-                        elif clean_text.startswith('[') or '---' in clean_text or '===' in clean_text:
-                            output_widget.setTextColor(QColor(ANSI_COLORS['36']))  # Cyan
-                        elif 'warning' in clean_text.lower() or clean_text.startswith('⚠'):
-                            output_widget.setTextColor(QColor(ANSI_COLORS['93']))  # Yellow
-                        else:
-                            output_widget.setTextColor(QColor(ANSI_COLORS['37']))  # White/default
-                        
-                        output_widget.append(clean_text)
-                except:
-                    # Queue is empty
-                    pass
-        
-        # Monitor process completion and reset button states
-        self._monitor_process_completion()
+        # Gazebo World Option
+        gazebo_frame = QFrame()
+        gazebo_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        gazebo_layout = QVBoxLayout(gazebo_frame)
+        gazebo_label = QLabel("Gazebo World")
+        gazebo_label.setFont(QFont("Ubuntu", 8, QFont.Bold))
+        gazebo_layout.addWidget(gazebo_label)
 
-    def _monitor_process_completion(self):
-        """Monitor running processes and reset button states when they complete"""
-        for category in list(self.command_widgets.keys()):
-            for cmd_name, cmd_widget in list(self.command_widgets[category].items()):
-                # Find the matching executor (consistent format for all categories)
-                exec_key = f"{category}_{cmd_name}"
+        # Gazebo combo and button in horizontal layout
+        gazebo_controls = QHBoxLayout()
+        self.gazebo_combo = QComboBox()
+        self.gazebo_combo.addItem("Select World...")
+        self.gazebo_combo.addItems(["Qualification", "Final"])
+        self.gazebo_combo.setFont(QFont("Ubuntu", 7))
+        self.gazebo_combo.setMaximumHeight(20)
+        gazebo_controls.addWidget(self.gazebo_combo)
+
+        self.gazebo_btn = QPushButton("Start")
+        self.gazebo_btn.setMaximumWidth(55)
+        self.gazebo_btn.setMaximumHeight(20)
+        self.gazebo_btn.setFont(QFont("Ubuntu", 7))
+        self.gazebo_btn.clicked.connect(lambda: self._toggle_gazebo_world())
+        gazebo_controls.addWidget(self.gazebo_btn)
+        gazebo_layout.addLayout(gazebo_controls)
+
+        col1_layout.addWidget(gazebo_frame)
+
+        # 8 Template buttons (4x2)
+        template_grid = QGridLayout()
+        template_grid.setSpacing(5)
+        self.template_buttons = {}
+
+        for row in range(4):
+            for col in range(2):
+                idx = row * 2 + col
+                btn = QPushButton("Camera Bridge" if idx == 0 else "")
+                btn.setMinimumHeight(40)
+                btn.setFont(QFont("Ubuntu", 9))
                 
-                if exec_key in self.executors:
-                    executor = self.executors[exec_key]
-                    # If process has finished but button still shows as running, reset it
-                    if executor and executor.process and executor.process.poll() is not None:
-                        if cmd_widget.is_running:
-                            cmd_widget.set_running(False)
-                            
-                            # Update ROS2 section buttons if process in ROS2
-                            if category == "ROS2":
-                                self._update_ros2_section_buttons()
+                if idx == 0:  # Camera Bridge
+                    btn.clicked.connect(lambda checked, b=btn: self._toggle_template_button(b, 0))
+                else:  # Template
+                    btn.clicked.connect(lambda checked, b=btn: self._toggle_template_button(b, idx))
+                
+                self.template_buttons[idx] = {'button': btn, 'is_running': False, 'executor': None}
+                template_grid.addWidget(btn, row, col)
 
-    def create_tabs(self):
-        """Create tabs for each category with separate output terminals"""
-        # Pre-set command_output_map for commands without console
-        self.command_output_map["Front Camera Bridge"] = None  # No output for Front Camera
+        col1_layout.addLayout(template_grid)
+        top_layout.addWidget(col1_frame, 1)
+        col1_frame.setMinimumWidth(150)
+
+        # ===== COLUMN 2: TEMPLATE BUTTONS, POWER MODE =====
+        col2_frame = QFrame()
+        col2_layout = QVBoxLayout(col2_frame)
+        col2_layout.setSpacing(5)
+
+        # 6 Template buttons (3x2)
+        template_grid2 = QGridLayout()
+        template_grid2.setSpacing(5)
+
+        for row in range(3):
+            for col in range(2):
+                btn = QPushButton("")
+                btn.setMinimumHeight(40)
+                btn.setFont(QFont("Ubuntu", 9))
+                btn.clicked.connect(lambda checked, b=btn: self._toggle_template_button(b, 100 + row * 2 + col))
+                self.template_buttons[100 + row * 2 + col] = {'button': btn, 'is_running': False, 'executor': None}
+                template_grid2.addWidget(btn, row, col)
+
+        col2_layout.addLayout(template_grid2)
+
+        # Power Mode Option
+        power_frame = QFrame()
+        power_frame.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        power_layout = QVBoxLayout(power_frame)
+        power_label = QLabel("Power Mode Option")
+        power_label.setFont(QFont("Ubuntu", 9, QFont.Bold))
+        power_layout.addWidget(power_label)
+
+        power_grid = QGridLayout()
+        power_grid.setSpacing(5)
         
-        for category, commands in COMMANDS.items():
-            # Check if this category should display output
-            has_output = category not in ["RQT"]
+        for i, mode in enumerate(["1", "2", "3", "Max"]):
+            btn = QPushButton(mode)
+            btn.setMinimumHeight(30)
+            btn.setFont(QFont("Ubuntu", 9))
+            btn.clicked.connect(lambda checked, m=mode: self._set_power_mode(m))
+            power_grid.addWidget(btn, 0, i)
+
+        power_layout.addLayout(power_grid)
+        col2_layout.addWidget(power_frame)
+
+        # Settings and Kill All
+        settings_layout = QHBoxLayout()
+        settings_btn = QPushButton("Settings")
+        settings_btn.setMinimumHeight(30)
+        settings_btn.setFont(QFont("Ubuntu", 9))
+        settings_layout.addWidget(settings_btn)
+
+        kill_all_btn = QPushButton("Kill All")
+        kill_all_btn.setMinimumHeight(30)
+        kill_all_btn.setFont(QFont("Ubuntu", 9))
+        kill_all_btn.clicked.connect(self._kill_all_processes)
+        settings_layout.addWidget(kill_all_btn)
+
+        col2_layout.addLayout(settings_layout)
+        col2_layout.addStretch()
+
+        top_layout.addWidget(col2_frame, 1)
+        col2_frame.setMinimumWidth(150)
+
+        # ===== COLUMN 3: MONITORING PANEL =====
+        self.monitoring_panel = MonitoringPanel()
+        monitoring_frame = QFrame()
+        monitoring_layout = QVBoxLayout(monitoring_frame)
+        monitoring_layout.addWidget(self.monitoring_panel)
+        monitoring_layout.addStretch()
+        monitoring_frame.setMinimumWidth(150)
+        top_layout.addWidget(monitoring_frame, 1)
+
+        main_layout.addLayout(top_layout)
+
+        # === BOTTOM SECTION - CONSOLES ===
+        console_grid = QGridLayout()
+        console_grid.setSpacing(10)
+
+        self.consoles = {}
+
+        # Console 1: SITL
+        self.consoles["sitl"] = self._create_command_console(
+            "SITL",
+            "ArduPilot",
+            "SITL"
+        )
+        console_grid.addWidget(self.consoles["sitl"], 0, 0)
+
+        # Console 2: MAVROS
+        self.consoles["mavros"] = self._create_command_console(
+            "MAVROS",
+            "MAVRoS",
+            "MAVRoS"
+        )
+        console_grid.addWidget(self.consoles["mavros"], 0, 1)
+
+        # Console 3: Vision Docker
+        self.consoles["vision"] = self._create_command_console(
+            "Vision Docker",
+            "Vision",
+            "Docker Container"
+        )
+        console_grid.addWidget(self.consoles["vision"], 0, 2)
+
+        # Consoles 4, 5, 6: ROS2 Package Selection
+        for i in range(3):
+            pkg_widget = ROS2PackageWidget(f"Package {i+1}", self._run_ros2_package)
+            self.consoles[f"ros2_{i}"] = pkg_widget
+            console_grid.addWidget(pkg_widget, 1, i)
+
+        main_layout.addLayout(console_grid, 1)
+
+    def _create_command_console(self, title, category, command_key):
+        """Create a command console widget"""
+        frame = QFrame()
+        frame.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Title with command button
+        title_layout = QHBoxLayout()
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Ubuntu", 9, QFont.Bold))
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+
+        cmd_btn = QPushButton("Start")
+        cmd_btn.setMaximumWidth(70)
+        cmd_btn.setMaximumHeight(25)
+        cmd_btn.setMinimumHeight(25)
+        cmd_btn.setFont(QFont("Ubuntu", 8))
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setMaximumWidth(60)
+        clear_btn.setMaximumHeight(25)
+        clear_btn.setMinimumHeight(25)
+        clear_btn.setFont(QFont("Ubuntu", 8))
+
+        # Store state
+        key = f"{category}_{command_key}"
+        if key not in self.executors:
+            self.executors[key] = None
+            self.output_queues[key] = Queue()
+
+        cmd_btn.clicked.connect(lambda: self._toggle_command(
+            category, command_key, key, cmd_btn
+        ))
+
+        title_layout.addWidget(cmd_btn)
+        title_layout.addWidget(clear_btn)
+        layout.addLayout(title_layout)
+
+        # Console
+        console = ConsoleWidget("")
+        clear_btn.clicked.connect(console.text_edit.clear)
+        layout.addWidget(console)
+
+        # Store console reference
+        self.command_widgets[key] = {
+            'console': console,
+            'button': cmd_btn,
+            'category': category,
+            'command_key': command_key,
+            'is_running': False
+        }
+
+        return frame
+
+    def _toggle_command(self, category, command_key, key, button):
+        """Toggle command execution"""
+        widget = self.command_widgets[key]
+        
+        if widget['is_running']:
+            executor = self.executors[key]
+            if executor:
+                executor.kill_process()
+            self._set_button_state(button, False, "Start")
+            widget['is_running'] = False
+        else:
+            command = COMMANDS[category][command_key]
+            self._run_command(key, command, button)
+            self._set_button_state(button, True, "Kill")
+            widget['is_running'] = True
+
+    def _toggle_template_button(self, button, idx):
+        """Toggle template button execution"""
+        button_data = self.template_buttons[idx]
+        
+        if button_data['is_running']:
+            if button_data['executor']:
+                button_data['executor'].kill_process()
+            self._set_button_state(button, False, "Camera Bridge" if idx == 0 else "")
+            button_data['is_running'] = False
+        else:
+            if idx == 0:  # Camera Bridge
+                command = "ros2 run ros_gz_bridge parameter_bridge '/front_camera@sensor_msgs/msg/Image@gz.msgs.Image'"
+            else:
+                return  # Template buttons do nothing yet
             
-            # Special handling for ArduPilot (2 output terminals)
-            if category == "ArduPilot":
-                self.create_ardupilot_tab(commands)
-            # Special handling for ROS2 (2 sections with single output terminal)
-            elif category == "ROS2":
-                self.create_ros2_tab(commands)
-            else:
-                # Create main container for this category
-                tab_container = QWidget()
-                if has_output:
-                    tab_layout = QHBoxLayout(tab_container)
-                else:
-                    tab_layout = QVBoxLayout(tab_container)
+            output_queue = Queue()
+            executor = CommandExecutor(output_queue)
+            button_data['executor'] = executor
+            button_data['is_running'] = True
+            
+            self._set_button_state(button, True, "Kill")
+            
+            thread = threading.Thread(target=executor.run_command, args=(command,))
+            thread.daemon = True
+            thread.start()
 
-                # Left side - Command buttons
-                left_widget = QWidget()
-                left_layout = QVBoxLayout(left_widget)
-
-                # Title
-                title = QLabel(category)
-                title.setFont(QFont("Arial", 12, QFont.Bold))
-                left_layout.addWidget(title)
-
-                # Buttons for each command
-                for cmd_name, cmd_string in commands.items():
-                    # Check if this is a separator
-                    is_separator = cmd_string == ""
-                    
-                    if is_separator:
-                        # Add spacer instead of separator button (height matches button)
-                        left_layout.addSpacing(80)
-                    else:
-                        # Create composite widget (button + dynamic kill)
-                        cmd_widget = CommandButtonWidget(
-                            cmd_name,
-                            on_run=lambda name, cat=category, cmd=cmd_string: self.on_command_start(cat, cmd, name),
-                            on_kill=lambda name, cat=category: self.on_command_kill(cat, name)
-                        )
-                        left_layout.addWidget(cmd_widget)
-                        
-                        # Store widget for later access
-                        if category not in self.command_widgets:
-                            self.command_widgets[category] = {}
-                        self.command_widgets[category][cmd_name] = cmd_widget
-
-                # Spacer
-                left_layout.addStretch()
-                
-                # Kill Terminal button for entire category (legacy, kept for backup)
-                if has_output:
-                    kill_btn = QPushButton("Kill All")
-                    kill_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
-                    kill_btn.clicked.connect(lambda checked, cat=category: self.kill_terminal(cat))
-                    left_layout.addWidget(kill_btn)
-
-                if has_output:
-                    # Right side - Output terminal for this category
-                    output_layout = QVBoxLayout()
-                    output_label = QLabel(f"{category} Output Console")
-                    output_label.setFont(QFont("Arial", 10, QFont.Bold))
-                    output_layout.addWidget(output_label)
-
-                    output_text = QTextEdit()
-                    output_text.setReadOnly(True)
-                    output_text.setFont(QFont("Courier", 9))
-                    # Dark background like terminal
-                    output_text.setStyleSheet("""
-                        QTextEdit {
-                            background-color: #1e1e1e;
-                            color: #e0e0e0;
-                            border: 1px solid #333;
-                        }
-                    """)
-                    output_layout.addWidget(output_text)
-
-                    # Store output widget and queue for this category
-                    self.output_widgets[category] = output_text
-                    self.output_queues[category] = Queue()
-
-                    # Button layout for clear and kill
-                    button_layout = QHBoxLayout()
-                    clear_btn = QPushButton("Clear Output")
-                    clear_btn.clicked.connect(output_text.clear)
-                    button_layout.addWidget(clear_btn)
-                    
-                    output_layout.addLayout(button_layout)
-
-                    right_widget = QWidget()
-                    right_widget.setLayout(output_layout)
-
-                    # Add left and right to tab
-                    tab_layout.addWidget(left_widget, 1)
-                    tab_layout.addWidget(right_widget, 1)
-                else:
-                    # For categories without output (like RQT)
-                    tab_layout.addWidget(left_widget, 1)
-
-                # Add tab
-                self.tab_widget.addTab(tab_container, category)
-
-    def create_ardupilot_tab(self, commands):
-        """Create ArduPilot tab with 2 separate output terminals (SITL and MAVRoS)"""
-        # Create main container
-        tab_container = QWidget()
-        main_layout = QHBoxLayout(tab_container)
-
-        # Left side - Command buttons in 2 weighted sections
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-
-        # Title
-        title = QLabel("ArduPilot")
-        title.setFont(QFont("Arial", 12, QFont.Bold))
-        left_layout.addWidget(title)
-
-        # SITL Section with weight
-        sitl_section = QWidget()
-        sitl_section_layout = QVBoxLayout(sitl_section)
-        sitl_section_layout.setContentsMargins(0, 0, 0, 0)
+    def _toggle_gazebo_world(self):
+        """Toggle Gazebo world execution"""
+        # Initialize executor if not exist
+        if 'gazebo' not in self.executors:
+            self.executors['gazebo'] = None
+            self.output_queues['gazebo'] = Queue()
         
-        # Buttons for SITL
-        for cmd_name, cmd_string in commands.items():
-            if cmd_name == "--- SITL ---":
-                sitl_section_layout.addSpacing(0)  # No visible spacer, use layout spacing
-            elif cmd_name.startswith("--- "):
-                break  # Stop at next section
-            else:
-                # Create composite widget (button + dynamic kill)
-                cmd_widget = CommandButtonWidget(
-                    cmd_name,
-                    on_run=lambda name, cmd=cmd_string: self.on_command_start("ArduPilot", cmd, name),
-                    on_kill=lambda name: self.on_command_kill("ArduPilot", name)
-                )
-                sitl_section_layout.addWidget(cmd_widget)
-                
-                # Store widget for later access
-                if "ArduPilot" not in self.command_widgets:
-                    self.command_widgets["ArduPilot"] = {}
-                self.command_widgets["ArduPilot"][cmd_name] = cmd_widget
-        
-        sitl_section_layout.addStretch()
-        left_layout.addWidget(sitl_section, 1)  # Give weight 1 to section
-
-        # MAVRoS Section with weight
-        mavros_section = QWidget()
-        mavros_section_layout = QVBoxLayout(mavros_section)
-        mavros_section_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Buttons for MAVRoS
-        found_mavros = False
-        for cmd_name, cmd_string in commands.items():
-            if cmd_name == "--- MAVRoS ---":
-                found_mavros = True
-                continue
-            elif found_mavros and cmd_string == "":
-                mavros_section_layout.addSpacing(0)
-            elif found_mavros:
-                # Create composite widget (button + dynamic kill)
-                cmd_widget = CommandButtonWidget(
-                    cmd_name,
-                    on_run=lambda name, cmd=cmd_string: self.on_command_start("ArduPilot", cmd, name),
-                    on_kill=lambda name: self.on_command_kill("ArduPilot", name)
-                )
-                mavros_section_layout.addWidget(cmd_widget)
-                
-                # Store widget for later access
-                if "ArduPilot" not in self.command_widgets:
-                    self.command_widgets["ArduPilot"] = {}
-                self.command_widgets["ArduPilot"][cmd_name] = cmd_widget
-        
-        mavros_section_layout.addStretch()
-        left_layout.addWidget(mavros_section, 1)  # Give weight 1 to section
-        
-        # Kill All button
-        kill_btn = QPushButton("Kill All")
-        kill_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
-        kill_btn.clicked.connect(lambda checked: self.kill_terminal("ArduPilot"))
-        left_layout.addWidget(kill_btn)
-
-        # Right side - 2 output terminals stacked vertically
-        right_container = QWidget()
-        right_layout = QVBoxLayout(right_container)
-
-        # SITL Terminal
-        sitl_layout = QVBoxLayout()
-        sitl_label = QLabel("SITL Output")
-        sitl_label.setFont(QFont("Arial", 10, QFont.Bold))
-        sitl_layout.addWidget(sitl_label)
-
-        sitl_text = QTextEdit()
-        sitl_text.setReadOnly(True)
-        sitl_text.setFont(QFont("Courier", 9))
-        sitl_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-                border: 1px solid #333;
-            }
-        """)
-        sitl_layout.addWidget(sitl_text)
-
-        sitl_clear_btn = QPushButton("Clear")
-        sitl_clear_btn.clicked.connect(sitl_text.clear)
-        sitl_layout.addWidget(sitl_clear_btn)
-
-        # Store SITL output widget and queue
-        self.output_widgets["ArduPilot_SITL"] = sitl_text
-        self.output_queues["ArduPilot_SITL"] = Queue()
-        
-        # Assign SITL commands to SITL output
-        self.command_output_map["Start SITL"] = "ArduPilot_SITL"
-
-        # MAVRoS Terminal (Output Terminal)
-        mavros_layout = QVBoxLayout()
-        mavros_label = QLabel("MAVRoS Output")
-        mavros_label.setFont(QFont("Arial", 10, QFont.Bold))
-        mavros_layout.addWidget(mavros_label)
-
-        mavros_text = QTextEdit()
-        mavros_text.setReadOnly(True)
-        mavros_text.setFont(QFont("Courier", 9))
-        mavros_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-                border: 1px solid #333;
-            }
-        """)
-        mavros_layout.addWidget(mavros_text)
-
-        mavros_clear_btn = QPushButton("Clear")
-        mavros_clear_btn.clicked.connect(mavros_text.clear)
-        mavros_layout.addWidget(mavros_clear_btn)
-
-        # Store MAVRoS output widget and queue
-        self.output_widgets["ArduPilot_MAVRoS"] = mavros_text
-        self.output_queues["ArduPilot_MAVRoS"] = Queue()
-        
-        # Assign MAVRoS commands to MAVRoS output
-        self.command_output_map["Launch MAVRoS"] = "ArduPilot_MAVRoS"
-
-        # Add both terminals to right layout vertically
-        sitl_widget = QWidget()
-        sitl_widget.setLayout(sitl_layout)
-        mavros_widget = QWidget()
-        mavros_widget.setLayout(mavros_layout)
-        
-        right_layout.addWidget(sitl_widget, 1)
-        right_layout.addWidget(mavros_widget, 1)
-
-        # Add left and right to main layout
-        main_layout.addWidget(left_widget, 1)
-        main_layout.addWidget(right_container, 2)
-
-        # Add tab
-        self.tab_widget.addTab(tab_container, "ArduPilot")
-
-    def create_ros2_tab(self, commands):
-        """Create ROS2 tab with 2 sections: Build Package and Mission Control
-        Each section has its own output terminal with weighted layout for alignment"""
-        # Create main container
-        tab_container = QWidget()
-        main_layout = QHBoxLayout(tab_container)
-
-        # Left side - Command buttons in 2 weighted sections
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-
-        # Title
-        title = QLabel("ROS2")
-        title.setFont(QFont("Arial", 12, QFont.Bold))
-        left_layout.addWidget(title)
-
-        # Build Package Section with weight
-        build_section = QWidget()
-        build_section_layout = QVBoxLayout(build_section)
-        build_section_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Section label
-        build_label = QLabel("Build Package")
-        build_label.setFont(QFont("Arial", 10, QFont.Bold))
-        build_section_layout.addWidget(build_label)
-
-        # Store buttons for Section 1
-        if "ROS2_Section1" not in self.section_groups:
-            self.section_groups["ROS2_Section1"] = []
-
-        # Process Build Package commands
-        found_build = False
-        for cmd_name, cmd_string in commands.items():
-            if "Build Package" in cmd_name and cmd_string != "":
-                found_build = True
-                cmd_widget = CommandButtonWidget(
-                    cmd_name,
-                    on_run=lambda name, cmd=cmd_string: self.on_ros2_command_start(name, cmd),
-                    on_kill=lambda name: self.on_command_kill("ROS2", name)
-                )
-                build_section_layout.addWidget(cmd_widget)
-                
-                # Store widget for later access
-                if "ROS2" not in self.command_widgets:
-                    self.command_widgets["ROS2"] = {}
-                self.command_widgets["ROS2"][cmd_name] = cmd_widget
-                self.section_groups["ROS2_Section1"].append(cmd_widget)
-        
-        build_section_layout.addStretch()
-        left_layout.addWidget(build_section, 1)  # Give weight 1 to section
-
-        # Mission Control Section with weight
-        mission_section = QWidget()
-        mission_section_layout = QVBoxLayout(mission_section)
-        mission_section_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Section label
-        mission_label = QLabel("Mission Control")
-        mission_label.setFont(QFont("Arial", 10, QFont.Bold))
-        mission_section_layout.addWidget(mission_label)
-
-        # Store buttons for Section 2
-        if "ROS2_Section2" not in self.section_groups:
-            self.section_groups["ROS2_Section2"] = []
-
-        # Process Mission Control commands
-        found_mission = False
-        for cmd_name, cmd_string in commands.items():
-            if cmd_name == "--- Mission Control ---":
-                found_mission = True
-                continue
-            elif found_mission and cmd_string != "" and cmd_name in ["Arm", "Qualification", "Final", "Test"]:
-                cmd_widget = CommandButtonWidget(
-                    cmd_name,
-                    on_run=lambda name, cmd=cmd_string: self.on_ros2_command_start(name, cmd),
-                    on_kill=lambda name: self.on_command_kill("ROS2", name)
-                )
-                mission_section_layout.addWidget(cmd_widget)
-                
-                # Store widget for later access
-                if "ROS2" not in self.command_widgets:
-                    self.command_widgets["ROS2"] = {}
-                self.command_widgets["ROS2"][cmd_name] = cmd_widget
-                self.section_groups["ROS2_Section2"].append(cmd_widget)
-        
-        mission_section_layout.addStretch()
-        left_layout.addWidget(mission_section, 1)  # Give weight 1 to section
-        
-        # Kill All button
-        kill_btn = QPushButton("Kill All")
-        kill_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
-        kill_btn.clicked.connect(lambda checked: self.kill_terminal("ROS2"))
-        left_layout.addWidget(kill_btn)
-
-        # Right side - 2 output terminals stacked vertically (Build Package and Mission Control)
-        right_container = QWidget()
-        right_layout = QVBoxLayout(right_container)
-
-        # Build Package Terminal
-        build_layout = QVBoxLayout()
-        build_label = QLabel("Build Package Output")
-        build_label.setFont(QFont("Arial", 10, QFont.Bold))
-        build_layout.addWidget(build_label)
-
-        build_text = QTextEdit()
-        build_text.setReadOnly(True)
-        build_text.setFont(QFont("Courier", 9))
-        build_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-                border: 1px solid #333;
-            }
-        """)
-        build_layout.addWidget(build_text)
-
-        build_clear_btn = QPushButton("Clear")
-        build_clear_btn.clicked.connect(build_text.clear)
-        build_layout.addWidget(build_clear_btn)
-
-        # Store Build Package output widget and queue
-        self.output_widgets["ROS2_Build"] = build_text
-        self.output_queues["ROS2_Build"] = Queue()
-        
-        # Assign Build Package command to Build output
-        self.command_output_map["Build Package"] = "ROS2_Build"
-
-        # Mission Control Terminal
-        mission_layout = QVBoxLayout()
-        mission_label = QLabel("Mission Control Output")
-        mission_label.setFont(QFont("Arial", 10, QFont.Bold))
-        mission_layout.addWidget(mission_label)
-
-        mission_text = QTextEdit()
-        mission_text.setReadOnly(True)
-        mission_text.setFont(QFont("Courier", 9))
-        mission_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-                border: 1px solid #333;
-            }
-        """)
-        mission_layout.addWidget(mission_text)
-
-        mission_clear_btn = QPushButton("Clear")
-        mission_clear_btn.clicked.connect(mission_text.clear)
-        mission_layout.addWidget(mission_clear_btn)
-
-        # Store Mission Control output widget and queue
-        self.output_widgets["ROS2_Mission"] = mission_text
-        self.output_queues["ROS2_Mission"] = Queue()
-        
-        # Assign Mission Control commands to Mission output
-        for cmd in ["Arm", "Qualification", "Final", "Test"]:
-            self.command_output_map[cmd] = "ROS2_Mission"
-
-        # Add both terminals to right layout vertically
-        build_widget = QWidget()
-        build_widget.setLayout(build_layout)
-        mission_widget = QWidget()
-        mission_widget.setLayout(mission_layout)
-        
-        right_layout.addWidget(build_widget, 1)
-        right_layout.addWidget(mission_widget, 1)
-
-        # Add left and right to main layout
-        main_layout.addWidget(left_widget, 1)
-        main_layout.addWidget(right_container, 2)
-
-        # Add tab
-        self.tab_widget.addTab(tab_container, "ROS2")
-
-    def on_command_start(self, category, command, name):
-        """Handle command start - auto-kill previous command if running"""
-        # SKIP auto-kill for ArduPilot (has 2 separate terminals, allows both to run)
-        if category != "ArduPilot":
-            # For non-ArduPilot categories, find and kill any other running command
-            for cmd_key, executor in list(self.executors.items()):
-                # Check if this executor belongs to this category but is a different command
-                if cmd_key.startswith(category + "_"):  # Same category
-                    cmd_name_in_key = cmd_key.replace(category + "_", "")
-                    if cmd_name_in_key != name:  # Different command
-                        if executor and executor.process and executor.process.poll() is None:
-                            # Kill the previous process
-                            print(f"[AUTO-KILL] Killing {cmd_key} to start {category}_{name}")
-                            executor.kill_process()
-                            time.sleep(0.3)
-                            
-                            # Reset button state
-                            if category in self.command_widgets and cmd_name_in_key in self.command_widgets[category]:
-                                self.command_widgets[category][cmd_name_in_key].set_running(False)
-        
-        # Now run the new command
-        self.run_command(category, command, name)
-    
-    def on_command_kill(self, category, name):
-        """Handle command kill from dynamic button"""
-        exec_key = f"{category}_{name}"
-        
-        if exec_key in self.executors:
-            executor = self.executors[exec_key]
-            if executor and executor.process and executor.process.poll() is None:
-                # Kill the process
-                threading.Thread(target=executor.kill_process, daemon=True).start()
-                
-                # Reset button state after a delay
-                def reset_button():
-                    time.sleep(0.5)
-                    if category in self.command_widgets:
-                        cmd_btn = self.command_widgets[category].get(name)
-                        if cmd_btn:
-                            cmd_btn.set_running(False)
-                    
-                    # Re-enable buttons in section if ROS2
-                    if category == "ROS2":
-                        self._update_ros2_section_buttons()
-                
-                threading.Thread(target=reset_button, daemon=True).start()
-
-    def on_ros2_command_start(self, name, command):
-        """Handle ROS2 command start with section-based button disabling
-        Mission Control section buttons are disabled when one is running"""
-        
-        # Find which section this command belongs to
-        section_key = None
-        if name == "Build Package":
-            section_key = "ROS2_Section1"
-        elif name in ["Arm", "Qualification", "Final", "Test"]:
-            section_key = "ROS2_Section2"
-        
-        # If this is a Mission Control command, kill any other running in same section
-        if section_key == "ROS2_Section2":
-            for cmd_key, executor in list(self.executors.items()):
-                if cmd_key.startswith("ROS2_"):
-                    cmd_name_in_key = cmd_key.replace("ROS2_", "")
-                    # Only kill if it's in the same section and different command
-                    if cmd_name_in_key in ["Arm", "Qualification", "Final", "Test"] and cmd_name_in_key != name:
-                        if executor and executor.process and executor.process.poll() is None:
-                            print(f"[AUTO-KILL-ROS2] Killing {cmd_key} to start ROS2_{name}")
-                            executor.kill_process()
-                            time.sleep(0.3)
-                            
-                            # Reset button state
-                            if "ROS2" in self.command_widgets and cmd_name_in_key in self.command_widgets["ROS2"]:
-                                self.command_widgets["ROS2"][cmd_name_in_key].set_running(False)
-        
-        # Run the new command
-        self.run_command("ROS2", command, name)
-        
-        # Update section button states
-        self._update_ros2_section_buttons()
-    
-    def _update_ros2_section_buttons(self):
-        """Update ROS2 section button enabled/disabled states based on running processes"""
-        # Check if any Mission Control command is running
-        mission_running = False
-        for cmd_key in self.executors.keys():
-            if cmd_key.startswith("ROS2_"):
-                cmd_name = cmd_key.replace("ROS2_", "")
-                if cmd_name in ["Arm", "Qualification", "Final", "Test"]:
-                    executor = self.executors[cmd_key]
-                    if executor and executor.process and executor.process.poll() is None:
-                        mission_running = True
-                        break
-        
-        # Disable/enable Mission Control buttons based on running state
-        if "ROS2_Section2" in self.section_groups:
-            for cmd_widget in self.section_groups["ROS2_Section2"]:
-                cmd_widget.set_enabled(not mission_running)
-    
-    def run_command(self, category, command, name):
-        """Run command in separate thread for specific category"""
-        
-        # Determine output queue for this command
-        if name in self.command_output_map:
-            output_key = self.command_output_map[name]
-            output_queue = self.output_queues.get(output_key)
-        elif category in self.output_queues:
-            output_key = category
-            output_queue = self.output_queues.get(output_key)
+        if self.executors['gazebo'] and self.executors['gazebo'].is_running:
+            # Kill process
+            self.executors['gazebo'].kill_process()
+            self._set_button_state(self.gazebo_btn, False, "Start")
         else:
-            # For RQT and other no-output categories
-            output_queue = None
-            output_key = None
-        
-        if output_queue:
-            # Has output terminal - post separator to queue
-            output_queue.put(f"\n{'='*80}")
-            output_queue.put(f"Command: {name}")
-            output_queue.put(f"{'='*80}")
+            # Get selected world
+            world_name = self.gazebo_combo.currentText()
+            if world_name == "Select World...":
+                return
+            
+            if world_name in COMMANDS["Gazebo"]:
+                command = COMMANDS["Gazebo"][world_name]
+                output_queue = self.output_queues['gazebo']
+                executor = CommandExecutor(output_queue)
+                self.executors['gazebo'] = executor
+                executor.is_running = True
+                
+                self._set_button_state(self.gazebo_btn, True, "Kill")
+                
+                thread = threading.Thread(target=executor.run_command, args=(command,))
+                thread.daemon = True
+                thread.start()
 
-            # Create unique key for tracking this execution (consistent across all categories)
-            exec_key = f"{category}_{name}"
-
-            # Create executor and thread - PASS OUTPUT QUEUE!
-            executor = CommandExecutor(output_queue=output_queue)
-            worker_thread = threading.Thread(target=executor.run_command, args=(command,))
-            worker_thread.daemon = True
-
-            # Store references
-            self.executors[exec_key] = executor
-            self.worker_threads[exec_key] = worker_thread
-
-            # Start thread
-            worker_thread.start()
+    def _set_button_state(self, button, is_running, text):
+        """Set button styling based on running state"""
+        button.setText(text)
+        if is_running:
+            # Kill button - red with bright hover, size stays same
+            button.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF4444;
+                    color: white;
+                    font-weight: bold;
+                    border-radius: 3px;
+                    padding: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #FF6666;
+                }
+            """)
         else:
-            # No output - just run in background (like RQT)
-            exec_key = f"{category}_{name}"
-            executor = CommandExecutor(output_queue=None)
-            worker_thread = threading.Thread(target=executor.run_command, args=(command,))
-            worker_thread.daemon = True
-            self.executors[exec_key] = executor
-            self.worker_threads[exec_key] = worker_thread
-            worker_thread.start()
+            # Start button - normal
+            button.setStyleSheet("")
 
-    def kill_terminal(self, category):
-        """Kill the running command in a category"""
-        killed_any = False
-        
-        # Find all running executors for this category (new consistent format)
-        for exec_key in list(self.executors.keys()):
-            if exec_key.startswith(category + "_"):  # Matches category_name format
-                executor = self.executors[exec_key]
-                if executor and executor.process and executor.process.poll() is None:
-                    # Run kill in background thread to avoid blocking GUI
-                    threading.Thread(target=executor.kill_process, daemon=True).start()
-                    killed_any = True
-        
-        # Notify output terminal(s)
-        if category == "ArduPilot":
-            # Notify both ArduPilot terminals
-            if "ArduPilot_SITL" in self.output_queues:
-                self.output_queues["ArduPilot_SITL"].put("✗ Killed by Kill All button")
-            if "ArduPilot_MAVRoS" in self.output_queues:
-                self.output_queues["ArduPilot_MAVRoS"].put("✗ Killed by Kill All button")
+    def _run_command(self, key, command, button):
+        """Run a command in background"""
+        output_queue = self.output_queues[key]
+        executor = CommandExecutor(output_queue)
+        self.executors[key] = executor
+        executor.is_running = True
+
+        thread = threading.Thread(target=executor.run_command, args=(command,))
+        thread.daemon = True
+        thread.start()
+
+        # Process queue
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(lambda: self._process_console_queue(key, button))
+        self.update_timer.start(100)
+
+    def _process_console_queue(self, key, button):
+        """Process console output queue"""
+        if key not in self.output_queues:
+            return
+
+        output_queue = self.output_queues[key]
+        console = self.command_widgets[key]['console']
+
+        try:
+            while True:
+                text = output_queue.get_nowait()
+                color = '#CCCCCC'
+
+                if text.startswith('✓') or 'success' in text.lower():
+                    color = ANSI_COLORS['32']
+                elif text.startswith('✗') or 'error' in text.lower():
+                    color = ANSI_COLORS['91']
+                elif text.startswith('[') or '---' in text:
+                    color = ANSI_COLORS['36']
+
+                console.append_text(text, color)
+        except:
+            pass
+
+        # Check if process finished
+        executor = self.executors[key]
+        if executor and executor.process and executor.process.poll() is not None:
+            self._set_button_state(button, False, "Start")
+            self.command_widgets[key]['is_running'] = False
+            executor.is_running = False
+
+    def _run_command_in_console(self, name, command, console_id):
+        """Run command in specific console"""
+        if console_id not in self.executors:
+            self.executors[console_id] = None
+            self.output_queues[console_id] = Queue()
+            self.command_widgets[console_id] = {
+                'console': self.consoles.get(console_id),
+                'button': None
+            }
+
+        executor = self.executors[console_id]
+        if executor and executor.is_running:
+            executor.kill_process()
         else:
-            # Notify the category terminal
-            if category in self.output_queues:
-                if killed_any:
-                    self.output_queues[category].put("✗ Killed by Kill All button")
-                else:
-                    self.output_queues[category].put("ℹ No running process to kill")
+            output_queue = self.output_queues[console_id]
+            executor = CommandExecutor(output_queue)
+            self.executors[console_id] = executor
+            executor.is_running = True
 
-    def closeEvent(self, event):
-        """Kill all running processes when app closes"""
-        print("[APP] Closing application, killing all processes...")
-        
-        # Kill all running processes
-        for exec_key, executor in list(self.executors.items()):
-            if executor and executor.process and executor.process.poll() is None:
-                print(f"[APP] Killing {exec_key}")
-                try:
-                    executor.kill_process()
-                except Exception as e:
-                    print(f"[APP] Error killing {exec_key}: {e}")
-        
-        # Give processes time to terminate
-        time.sleep(0.5)
-        
-        # Accept the close event
-        event.accept()
-        print("[APP] Application closed")
+            thread = threading.Thread(target=executor.run_command, args=(command,))
+            thread.daemon = True
+            thread.start()
 
-def main():
-    app = QApplication(sys.argv)
-    gui = ROS2CommandGUI()
-    gui.show()
-    sys.exit(app.exec_())
+    def _run_ros2_package(self, package_name, command, widget):
+        """Run ROS2 package"""
+        widget.run_command(command)
+
+    def _set_power_mode(self, mode):
+        """Set power mode on Jetson Orin Nano"""
+        if mode in POWER_MODES:
+            command = POWER_MODES[mode]
+            # Run with sudo in background
+            thread = threading.Thread(target=lambda: subprocess.call(f"echo 'Setting power mode {mode}' && {command}", shell=True))
+            thread.daemon = True
+            thread.start()
+
+    def _kill_all_processes(self):
+        """Kill all running processes"""
+        for key, executor in self.executors.items():
+            if executor and executor.process:
+                executor.kill_process()
+
+    def setup_monitoring(self):
+        """Setup monitoring timer"""
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self._monitor_processes)
+        self.monitor_timer.start(500)  # Check every 500ms
+
+    def _monitor_processes(self):
+        """Monitor all running processes and update button states"""
+        self.monitoring_panel.update_stats()
+        
+        # Monitor Gazebo process
+        if 'gazebo' in self.executors and self.executors['gazebo']:
+            if self.executors['gazebo'].process and self.executors['gazebo'].process.poll() is not None:
+                self._set_button_state(self.gazebo_btn, False, "Start")
+                self.executors['gazebo'].is_running = False
+        
+        # Monitor template buttons
+        for idx, button_data in self.template_buttons.items():
+            if button_data['is_running'] and button_data['executor']:
+                if button_data['executor'].process and button_data['executor'].process.poll() is not None:
+                    button_data['is_running'] = False
+                    button = button_data['button']
+                    original_text = "Camera Bridge" if idx == 0 else ""
+                    self._set_button_state(button, False, original_text)
 
 
 if __name__ == "__main__":
-    main()
+    app = QApplication(sys.argv)
+    window = CompactCommandGUI()
+    window.show()
+    sys.exit(app.exec_())
