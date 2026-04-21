@@ -332,13 +332,19 @@ class MonitoringPanel(QFrame):
                 ram_total = ram_match.group(2)
                 self.stats["RAM"].setText(f"RAM: {ram_used}/{ram_total}MB")
             
-            # CPU parsing: CPU [xx%,yy%,zz%,ww%]
+            # CPU parsing: CPU [xx%@xxxx,yy%@yyyy,...]
             cpu_match = re.search(r'CPU \[([^\]]+)\]', line)
             if cpu_match:
                 cpu_vals = cpu_match.group(1).split(',')
                 try:
-                    cpu_avg = sum(int(v.strip().replace('%', '')) for v in cpu_vals) // len(cpu_vals)
-                    self.stats["CPU"].setText(f"CPU: {cpu_avg}%")
+                    percentages = []
+                    for v in cpu_vals:
+                        pct_match = re.search(r'(\d+)%', v)
+                        if pct_match:
+                            percentages.append(int(pct_match.group(1)))
+                    if percentages:
+                        cpu_avg = sum(percentages) // len(percentages)
+                        self.stats["CPU"].setText(f"CPU: {cpu_avg}%")
                 except:
                     pass
             
@@ -619,9 +625,9 @@ class CompactCommandGUI(QMainWindow):
         )
         console_grid.addWidget(self.consoles["mavros"], 0, 1)
 
-        # Console 3: Vision Docker
+        # Console 3: Vision
         self.consoles["vision"] = self._create_command_console(
-            "Vision Docker",
+            "Vision",
             "Vision",
             "Docker Container"
         )
