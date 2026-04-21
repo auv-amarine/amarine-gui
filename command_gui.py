@@ -58,7 +58,8 @@ COMMANDS = {
         "Final": "gz sim -v 3 -r sauvc_final.world",
     },
     "Vision": {
-        "Docker Container": "docker start be537dc7c441 && docker exec be537dc7c441 bash -c 'cd /ultralytics && export ROS_DOMAIN_ID=0 && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && source /opt/ros/humble/setup.bash && python3 detect_ros.py'",
+        "detect_ros.py": "docker start be537dc7c441 && docker exec be537dc7c441 bash -c 'cd /ultralytics && export ROS_DOMAIN_ID=0 && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && source /opt/ros/humble/setup.bash && python3 detect_ros.py'",
+        "detect_ros_2.py": "docker start be537dc7c441 && docker exec be537dc7c441 bash -c 'cd /ultralytics && export ROS_DOMAIN_ID=0 && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && source /opt/ros/humble/setup.bash && python3 detect_ros_2.py'",
     },
     "ArduPilot": {
         "SITL": "cd ~/ardupilot && Tools/autotest/sim_vehicle.py -L RATBeach -v ArduSub -f vectored --model=JSON --out=udp:0.0.0.0:14550 --console",
@@ -370,6 +371,127 @@ class MonitoringPanel(QFrame):
             pass
 
 
+class VisionWidget(QFrame):
+    """Widget for selecting and running Vision Docker container with file selection"""
+
+    def __init__(self, console_title, on_run, parent=None):
+        super().__init__(parent)
+        self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+        self.on_run = on_run
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Dropdown layout
+        dropdown_layout = QHBoxLayout()
+        dropdown_layout.setSpacing(5)
+
+        self.vision_combo = QComboBox()
+        self.vision_combo.addItem("Select file...")
+        for file_name in COMMANDS["Vision"].keys():
+            self.vision_combo.addItem(file_name)
+        self.vision_combo.setFont(QFont("Ubuntu", 10))
+        dropdown_layout.addWidget(self.vision_combo)
+
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setMaximumWidth(70)
+        self.start_btn.setMaximumHeight(25)
+        self.start_btn.setMinimumHeight(25)
+        self.start_btn.setFont(QFont("Ubuntu", 8))
+        self.start_btn.clicked.connect(self._on_start_clicked)
+        dropdown_layout.addWidget(self.start_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setMaximumWidth(60)
+        clear_btn.setMaximumHeight(25)
+        clear_btn.setMinimumHeight(25)
+        clear_btn.setFont(QFont("Ubuntu", 8))
+        dropdown_layout.addWidget(clear_btn)
+
+        layout.addLayout(dropdown_layout)
+
+        # Console
+        self.console = ConsoleWidget("")
+        clear_btn.clicked.connect(self.console.text_edit.clear)
+        layout.addWidget(self.console)
+
+        self.executor = None
+        self.is_running = False
+
+    def _on_start_clicked(self):
+        """Handle start/kill button click"""
+        if self.is_running:
+            if self.executor:
+                self.executor.kill_process()
+            self._set_button_state(False, "Start")
+            self.is_running = False
+        else:
+            file_name = self.vision_combo.currentText()
+            if file_name in COMMANDS["Vision"]:
+                command = COMMANDS["Vision"][file_name]
+                self.on_run(file_name, command, self)
+                self._set_button_state(True, "Kill")
+                self.is_running = True
+
+    def _set_button_state(self, is_running, text):
+        """Set button styling based on running state"""
+        self.start_btn.setText(text)
+        if is_running:
+            # Kill button - red with bright hover, size stays same
+            self.start_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF4444;
+                    color: white;
+                    font-weight: bold;
+                    border-radius: 3px;
+                    padding: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #FF6666;
+                }
+            """)
+        else:
+            # Start button - normal
+            self.start_btn.setStyleSheet("")
+
+    def run_command(self, command):
+        """Run command in executor"""
+        output_queue = Queue()
+        self.executor = CommandExecutor(output_queue)
+
+        # Run in thread
+        thread = threading.Thread(target=self.executor.run_command, args=(command,))
+        thread.daemon = True
+        thread.start()
+
+        # Update console from queue
+        self.update_console_timer = QTimer()
+        self.update_console_timer.timeout.connect(lambda: self._process_queue(output_queue))
+        self.update_console_timer.start(100)
+
+    def _process_queue(self, output_queue):
+        """Process output queue"""
+        try:
+            while True:
+                text = output_queue.get_nowait()
+                color = '#CCCCCC'
+
+                if text.startswith('✓') or 'success' in text.lower():
+                    color = ANSI_COLORS['32']
+                elif text.startswith('✗') or 'error' in text.lower():
+                    color = ANSI_COLORS['91']
+                elif text.startswith('[') or '---' in text:
+                    color = ANSI_COLORS['36']
+
+                self.console.append_text(text, color)
+
+                if 'Command finished' in text or 'killed' in text.lower():
+                    self.is_running = False
+
+        except:
+            pass
+
+
 class ROS2PackageWidget(QFrame):
     """Widget for selecting and running ROS2 packages"""
 
@@ -625,12 +747,8 @@ class CompactCommandGUI(QMainWindow):
         )
         console_grid.addWidget(self.consoles["mavros"], 0, 1)
 
-        # Console 3: Vision
-        self.consoles["vision"] = self._create_command_console(
-            "Vision",
-            "Vision",
-            "Docker Container"
-        )
+        # Console 3: Vision Docker
+        self.consoles["vision"] = VisionWidget("Vision", self._run_vision_command)
         console_grid.addWidget(self.consoles["vision"], 0, 2)
 
         # Consoles 4, 5, 6: ROS2 Package Selection
@@ -868,6 +986,10 @@ class CompactCommandGUI(QMainWindow):
 
     def _run_ros2_package(self, package_name, command, widget):
         """Run ROS2 package"""
+        widget.run_command(command)
+
+    def _run_vision_command(self, file_name, command, widget):
+        """Run Vision Docker command"""
         widget.run_command(command)
 
     def _kill_all_processes(self):
