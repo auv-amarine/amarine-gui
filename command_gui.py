@@ -57,7 +57,7 @@ COMMANDS = {
         "Final": "gz sim -v 3 -r sauvc_final.world",
     },
     "Vision": {
-        "Docker Container": "docker start -ai be537dc7c441",
+        "Docker Container": "docker start be537dc7c441 && docker exec be537dc7c441 bash -c 'cd /ultralytics && export ROS_DOMAIN_ID=0 && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && source /opt/ros/humble/setup.bash && python3 detect_ros.py'",
     },
     "ArduPilot": {
         "SITL": "cd ~/ardupilot && Tools/autotest/sim_vehicle.py -L RATBeach -v ArduSub -f vectored --model=JSON --out=udp:0.0.0.0:14550 --console",
@@ -76,10 +76,10 @@ COMMANDS = {
 
 # Jetson Orin Nano Power Modes
 POWER_MODES = {
-    "1": "nvpmodel -m 0",  # 15W
-    "2": "nvpmodel -m 1",  # 25W
-    "3": "nvpmodel -m 2",  # 30W
-    "Max": "nvpmodel -m 3",  # 40W (if available)
+    "1": "sudo nvpmodel -m 3",  # 7W
+    "2": "sudo nvpmodel -m 0",  # 15W
+    "3": "sudo nvpmodel -m 1",  # 25W
+    "Max": "sudo nvpmodel -m 2",  # MAXN SUPER
 }
 
 
@@ -90,6 +90,7 @@ class CommandExecutor:
         self.process = None
         self.output_queue = output_queue
         self.is_running = False
+        self.is_vision = False
 
     def append_to_queue(self, text):
         """Post text to output queue"""
@@ -100,6 +101,7 @@ class CommandExecutor:
         """Run command and post output to queue"""
         try:
             self.is_running = True
+            self.is_vision = 'docker exec be537dc7c441' in command
             text = f"▶ Running: {command}\n"
             self.append_to_queue(text)
             self.append_to_queue("─" * 80)
@@ -145,6 +147,38 @@ class CommandExecutor:
     def kill_process(self):
         """Kill the running process and all its children"""
         if not self.process:
+            return
+
+        if self.is_vision:
+            if self.output_queue:
+                self.output_queue.put("\n✗ KILLING VISION PROCESS...")
+
+            # First, kill the subprocess
+            try:
+                pid = self.process.pid
+                try:
+                    pgid = os.getpgid(pid)
+                except OSError:
+                    pgid = pid
+
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(0.5)
+                if self.process.poll() is None:
+                    os.killpg(pgid, signal.SIGKILL)
+            except Exception as e:
+                if self.output_queue:
+                    self.output_queue.put(f"Kill subprocess error: {str(e)}")
+
+            # Then stop docker container
+            try:
+                subprocess.call("docker stop be537dc7c441", shell=True)
+                if self.output_queue:
+                    self.output_queue.put("✓ Docker container stopped")
+            except Exception as e:
+                if self.output_queue:
+                    self.output_queue.put(f"Docker stop error: {str(e)}")
+            
+            self.is_running = False
             return
 
         if self.output_queue:
