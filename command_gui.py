@@ -73,6 +73,7 @@ COMMANDS = {
         "Arm": "ros2 run sauvc26_code arm",
         "Qualification": "ros2 run sauvc26_code qualification",
         "Final": "ros2 run sauvc26_code final",
+        "Echo YOLO Target": "ros2 topic echo /yolo_target_coord",
     }
 }
 
@@ -493,7 +494,7 @@ class VisionWidget(QFrame):
 
 
 class ROS2PackageWidget(QFrame):
-    """Widget for selecting and running ROS2 packages"""
+    """Widget for selecting and running ROS2 nodes"""
 
     def __init__(self, console_title, on_run, parent=None):
         super().__init__(parent)
@@ -507,12 +508,12 @@ class ROS2PackageWidget(QFrame):
         dropdown_layout = QHBoxLayout()
         dropdown_layout.setSpacing(5)
 
-        self.package_combo = QComboBox()
-        self.package_combo.addItem("Select package...")
-        for package_name in COMMANDS["ROS2"].keys():
-            self.package_combo.addItem(package_name)
-        self.package_combo.setFont(QFont("Ubuntu", 10))
-        dropdown_layout.addWidget(self.package_combo)
+        self.node_combo = QComboBox()
+        self.node_combo.addItem("Select node...")
+        for node_name in COMMANDS["ROS2"].keys():
+            self.node_combo.addItem(node_name)
+        self.node_combo.setFont(QFont("Ubuntu", 10))
+        dropdown_layout.addWidget(self.node_combo)
 
         self.start_btn = QPushButton("Start")
         self.start_btn.setMaximumWidth(70)
@@ -547,10 +548,10 @@ class ROS2PackageWidget(QFrame):
             self._set_button_state(False, "Start")
             self.is_running = False
         else:
-            package_name = self.package_combo.currentText()
-            if package_name in COMMANDS["ROS2"]:
-                command = COMMANDS["ROS2"][package_name]
-                self.on_run(package_name, command, self)
+            node_name = self.node_combo.currentText()
+            if node_name in COMMANDS["ROS2"]:
+                command = COMMANDS["ROS2"][node_name]
+                self.on_run(node_name, command, self)
                 self._set_button_state(True, "Kill")
                 self.is_running = True
 

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Amarine GUI
+Comment=GUI of Amarine
+Exec='python3 ~/amarine-gui/command_gui.py'
+Icon=/home/amarine/amarine-gui/image.png
+Type=Application
