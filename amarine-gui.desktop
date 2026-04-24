@@ -1,6 +1,11 @@
 [Desktop Entry]
 Name=Amarine GUI
 Comment=GUI of Amarine
-Exec='python3 ~/amarine-gui/command_gui.py'
+Exec=bash /home/amarine/amarine-gui/launch_gui_simple.sh
 Icon=/home/amarine/amarine-gui/image.png
 Type=Application
+Terminal=false
+Categories=Development;
+MimeType=application/amarine-gui;
+Keywords=amarine;
+StartupNotify=true
